@@ -46,3 +46,14 @@ class AuthVerifyOut(BaseModel):
 
     authenticated: bool = Field(True, description="Authentication confirmation.")
     tenant: TenantOut = Field(..., description="Authenticated tenant information.")
+
+
+class CircuitStatusOut(BaseModel):
+    """Diagnostic status for an upstream provider circuit breaker."""
+
+    provider: str = Field(..., description="Provider name (groq, openai, gemini, etc.)")
+    state: str = Field(..., description="Circuit state: CLOSED, OPEN, HALF_OPEN")
+    consecutive_failures: int = Field(..., description="Current consecutive failure count.")
+    failure_threshold: int = Field(..., description="Threshold that trips circuit to OPEN.")
+    last_failure_timestamp: Optional[float] = Field(None, description="Unix timestamp of most recent failure.")
+    recovery_timeout_seconds: float = Field(..., description="Cooldown duration before attempting HALF_OPEN probe.")

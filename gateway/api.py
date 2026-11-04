@@ -7,10 +7,10 @@ Central Router:
   - Auto-generates OpenAPI 3.1 documentation at /api/v1/docs and /openapi.json.
   - Implements pure async def views to prevent thread blocking under ASGI.
   - Secures endpoints via cryptographically hashed API Keys using `APIKeyAuth`.
-  - Dispatches chat completions to unified provider adapters (Groq, Gemini, OpenAI, Mock).
+  - Dispatches chat completions via dynamic routing, circuit breaking, and fallbacks.
 """
 import logging
-from typing import List
+from typing import List, Optional
 
 from asgiref.sync import sync_to_async
 from ninja import NinjaAPI
@@ -23,11 +23,12 @@ from gateway.adapters.exceptions import (
     ProviderRateLimitError,
     ProviderTimeoutError,
 )
-from gateway.adapters.factory import ProviderFactory
 from gateway.adapters.schemas import ChatCompletionRequest, ChatCompletionResponse
 from gateway.health.router import router as health_router
 from gateway.models import ModelPricing, Tenant
-from gateway.schemas import AuthVerifyOut, ModelPricingOut, TenantOut
+from gateway.routing.circuit_breaker import circuit_breaker
+from gateway.routing.orchestrator import RoutingOrchestrator
+from gateway.schemas import AuthVerifyOut, CircuitStatusOut, ModelPricingOut, TenantOut
 from gateway.security import api_key_auth, api_key_header_auth
 
 logger = logging.getLogger(__name__)
@@ -37,13 +38,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 api = NinjaAPI(
     title="Intelligent Multi-Model LLM Gateway",
-    version="3.0.0",
+    version="4.0.0",
     description=(
         "Enterprise-grade Intelligent Multi-Model LLM Gateway with Dynamic Routing, "
         "Fallbacks, and FinOps Controls.\n\n"
         "- **Phase 1**: Pure ASGI Scaffold, Docker Infrastructure & Concurrent Health Probes\n"
         "- **Phase 2**: Multi-Tenant Isolation, SHA-256 Hashed API Key Auth & Token Pricing Catalog\n"
-        "- **Phase 3**: Unified LLM Provider Adapters (Groq, Gemini, OpenAI, Mock) & Real-time FinOps Tracking"
+        "- **Phase 3**: Unified LLM Provider Adapters (Groq, Gemini, OpenAI, Mock) & Real-time FinOps Tracking\n"
+        "- **Phase 4**: Dynamic Model Routing, Intelligent Fallbacks & Distributed Redis Circuit Breakers"
     ),
     docs_url="/docs",
     openapi_url="/openapi.json",
@@ -131,7 +133,42 @@ async def list_model_pricing(request) -> List[ModelPricingOut]:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: Unified Chat Completion Execution Engine
+# Dynamic Routing & Circuit Breaker Telemetry
+# ---------------------------------------------------------------------------
+
+
+@api.get(
+    "/routing/circuits",
+    response=List[CircuitStatusOut],
+    summary="Inspect Provider Circuit Breakers",
+    description=(
+        "Returns live distributed circuit breaker states (CLOSED, OPEN, HALF_OPEN), "
+        "consecutive failure counts, and recovery timeouts for all upstream providers."
+    ),
+    tags=["Dynamic Routing & Resiliency"],
+)
+async def list_circuit_breakers(request) -> List[CircuitStatusOut]:
+    """Inspects Redis-backed circuit breaker state across all providers."""
+    providers = ["groq", "openai", "gemini", "mock"]
+    circuits = await circuit_breaker.get_all_circuits(providers)
+    return [CircuitStatusOut(**c) for c in circuits]
+
+
+@api.post(
+    "/routing/circuits/{provider}/reset",
+    auth=[api_key_auth, api_key_header_auth],
+    summary="Reset Provider Circuit Breaker",
+    description="Manually resets a tripped circuit breaker back to CLOSED state.",
+    tags=["Dynamic Routing & Resiliency"],
+)
+async def reset_circuit_breaker(request, provider: str) -> dict:
+    """Resets circuit breaker failures and state in Redis."""
+    await circuit_breaker.reset(provider)
+    return {"status": "success", "provider": provider.lower(), "state": "CLOSED"}
+
+
+# ---------------------------------------------------------------------------
+# Unified Chat Completion Execution Engine (Dynamic Routing & Fallbacks)
 # ---------------------------------------------------------------------------
 
 
@@ -139,21 +176,21 @@ async def list_model_pricing(request) -> List[ModelPricingOut]:
     "/chat/completions",
     auth=[api_key_auth, api_key_header_auth],
     response=ChatCompletionResponse,
-    summary="Unified Chat Completion Execution",
+    summary="Unified Chat Completion with Dynamic Routing & Fallbacks",
     description=(
-        "Executes a chat completion across integrated providers (Groq, OpenAI, Gemini, Mock). "
-        "Enforces tenant budget checks, normalizes request/response format to OpenAI specifications, "
-        "and computes per-token FinOps expenses in real time."
+        "Executes chat completions with dynamic strategy routing (cost_optimized, fast, quality), "
+        "automatic failover, and Redis-backed circuit breaking across upstream providers."
     ),
     tags=["Chat Completions"],
 )
 async def chat_completions(request, payload: ChatCompletionRequest) -> ChatCompletionResponse:
     """
-    Async non-blocking chat completion endpoint.
-    1. Authenticates tenant via Bearer/X-API-Key.
-    2. Enforces FinOps monthly spending budget.
-    3. Resolves and dispatches to appropriate provider adapter.
-    4. Calculates token cost and atomically logs spend to PostgreSQL.
+    Async non-blocking chat completion endpoint with dynamic routing and fallbacks.
+    1. Authenticates tenant via Bearer / X-API-Key.
+    2. Validates FinOps monthly spending budget.
+    3. Resolves candidate models and skips tripped (OPEN) circuit breakers.
+    4. Automatically falls back upon provider failure.
+    5. Calculates exact token costs and updates tenant spend in PostgreSQL.
     """
     tenant: Tenant = request.auth
 
@@ -163,7 +200,7 @@ async def chat_completions(request, payload: ChatCompletionRequest) -> ChatCompl
         raise HttpError(402, "Tenant monthly spending budget exceeded. Operation blocked by FinOps policy.")
 
     try:
-        response = await ProviderFactory.execute_completion(request=payload, tenant=tenant)
+        response = await RoutingOrchestrator.route_and_execute(request=payload, tenant=tenant)
         return response
 
     except ModelNotSupportedError as exc:
