@@ -62,15 +62,15 @@ class Tenant(models.Model):
         help_text="Tenant subscription tier.",
     )
     monthly_budget_usd = models.DecimalField(
-        max_digits=10,
-        decimal_places=4,
-        default=Decimal("0.0000"),
+        max_digits=12,
+        decimal_places=6,
+        default=Decimal("0.000000"),
         help_text="Configured monthly spending cap in USD.",
     )
     current_spend_usd = models.DecimalField(
-        max_digits=10,
-        decimal_places=4,
-        default=Decimal("0.0000"),
+        max_digits=12,
+        decimal_places=6,
+        default=Decimal("0.000000"),
         help_text="Accumulated spending for the current billing cycle in USD.",
     )
     rpm_limit = models.IntegerField(
@@ -104,16 +104,16 @@ class Tenant(models.Model):
     @property
     def remaining_budget_usd(self) -> Decimal:
         """Calculate the remaining budget for the billing cycle."""
-        return max(Decimal("0.0000"), self.monthly_budget_usd - self.current_spend_usd)
+        return max(Decimal("0.000000"), self.monthly_budget_usd - self.current_spend_usd)
 
-    def has_budget_remaining(self, estimated_cost: Decimal = Decimal("0.0000")) -> bool:
+    def has_budget_remaining(self, estimated_cost: Decimal = Decimal("0.000000")) -> bool:
         """
         Check if the tenant has sufficient budget for an operation.
         If monthly_budget_usd is 0, it indicates an unlimited or unset budget.
         """
-        if self.monthly_budget_usd <= Decimal("0.0000"):
+        if self.monthly_budget_usd <= Decimal("0.000000"):
             return True
-        return (self.current_spend_usd + estimated_cost) <= self.monthly_budget_usd
+        return (self.current_spend_usd + estimated_cost) < self.monthly_budget_usd
 
 
 class APIKey(models.Model):
