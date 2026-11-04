@@ -1,0 +1,130 @@
+version: "3.9"
+
+# =============================================================================
+# LLM Gateway — Docker Compose (Development)
+#
+# Services:
+#   db      → PostgreSQL 16 with persistent volume + health check
+#   redis   → Redis 7 Alpine with persistence + health check
+#   api     → Django ASGI app via Uvicorn (hot-reload)
+#   worker  → Celery worker stub (activated fully in Phase 6)
+#
+# Usage:
+#   docker compose up -d db redis   # Phase 1: infra only
+#   docker compose up -d            # All services
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: llmgw_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       llm_gateway
+      POSTGRES_USER:     gateway_user
+      POSTGRES_PASSWORD: gateway_pass
+    volumes:
+      # Named volume → survives `docker compose down` without -v flag
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      # pg_isready exits 0 only when the server is ready to accept connections
+      test: ["CMD-SHELL", "pg_isready -U gateway_user -d llm_gateway"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s   # Grace period before health checks begin
+
+  # ---------------------------------------------------------------------------
+  # Redis 7 Alpine
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: llmgw_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+    volumes:
+      # Named volume → AOF log + RDB snapshot persist across restarts
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      # redis-cli ping returns PONG on success
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Django ASGI API  (Uvicorn — hot-reload in dev)
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      target: builder
+    container_name: llmgw_api
+    restart: unless-stopped
+    command: >
+      uvicorn config.asgi:application
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --loop asyncio
+      --log-level debug
+    volumes:
+      - .:/app          # Live source mount for --reload
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL:              postgres://gateway_user:gateway_pass@db:5432/llm_gateway
+      REDIS_URL:                 redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE:   config.settings.development
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Celery Worker  (stub — activated fully in Phase 6)
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      target: builder
+    container_name: llmgw_worker
+    restart: unless-stopped
+    command: celery -A config.celery_app worker --loglevel=info --concurrency=4
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL:              postgres://gateway_user:gateway_pass@db:5432/llm_gateway
+      REDIS_URL:                 redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE:   config.settings.development
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+# =============================================================================
+# Named volumes (persist across container restarts)
+# =============================================================================
+volumes:
+  postgres_data:
+  redis_data:

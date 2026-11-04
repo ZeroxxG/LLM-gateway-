@@ -1,0 +1,42 @@
+# =============================================================================
+# LLM Gateway — Python Dependencies  (Phase 1)
+# =============================================================================
+# Pin exact versions for reproducible builds across all environments.
+# Use `pip install -r requirements.txt` inside your virtualenv.
+# =============================================================================
+
+# --- Core Framework ---
+Django==5.1.2
+django-ninja==1.3.0
+uvicorn[standard]==0.32.0     # [standard] pulls in websockets + httptools
+gunicorn==23.0.0
+
+# --- Database  (psycopg3 — mandatory for Django 5.x async ORM) ---
+# psycopg[binary] bundles the compiled C extension; no system libpq needed
+psycopg[binary]==3.2.3
+django-environ==0.11.2        # DATABASE_URL parsing
+
+# --- In-Memory State & Rate Limiting ---
+redis[asyncio]==5.2.0         # [asyncio] pulls in redis.asyncio sub-package
+# hiredis==3.0.0                # C-extension parser; 10x faster than pure-Python
+
+# --- Async HTTP Client  (LLM provider calls, Phase 3+) ---
+httpx==0.27.2
+
+# --- Background Workers  (Phase 6) ---
+celery[redis]==5.4.0
+django-celery-results==2.5.1
+django-celery-beat==2.7.0
+
+# --- Data Validation ---
+pydantic==2.9.2
+pydantic-settings==2.6.0
+
+# --- Telemetry & Structured Logging  (Phase 7) ---
+langfuse==2.33.0
+structlog==24.4.0
+python-json-logger==2.0.7
+
+# --- Performance & Utilities ---
+orjson==3.10.11               # Drop-in ujson replacement, fastest JSON in Python
+python-dotenv==1.0.1
