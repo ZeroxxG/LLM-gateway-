@@ -57,3 +57,19 @@ class CircuitStatusOut(BaseModel):
     failure_threshold: int = Field(..., description="Threshold that trips circuit to OPEN.")
     last_failure_timestamp: Optional[float] = Field(None, description="Unix timestamp of most recent failure.")
     recovery_timeout_seconds: float = Field(..., description="Cooldown duration before attempting HALF_OPEN probe.")
+
+
+class BudgetTopUpIn(BaseModel):
+    """Input payload to adjust or top up tenant monthly budget cap."""
+
+    additional_budget_usd: Decimal = Field(..., gt=Decimal("0.00"), description="Additional budget in USD to add.")
+
+
+class RateLimitStatusOut(BaseModel):
+    """Current rate limit status and remaining quota for tenant."""
+
+    rpm_limit: int = Field(..., description="Requests per minute limit.")
+    rpm_remaining: int = Field(..., description="Remaining requests allowed in current window.")
+    tpm_limit: int = Field(..., description="Tokens per minute limit.")
+    tpm_remaining: int = Field(..., description="Remaining tokens allowed in current window.")
+    window_reset_seconds: int = Field(..., description="Seconds until window counter resets.")
