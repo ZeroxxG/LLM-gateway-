@@ -37,6 +37,10 @@ class ChatCompletionRequest(BaseModel):
         description="Target model identifier (e.g. 'groq/llama-3.1-8b', 'openai/gpt-4o-mini', 'google/gemini-1.5-flash', 'mock/test-model').",
         examples=["groq/llama-3.1-8b"],
     )
+    strategy: Optional[str] = Field(
+        default=None,
+        description="Optional routing strategy override (e.g. 'cost_optimized', 'latency_optimized', 'quality_optimized').",
+    )
     messages: List[ChatMessage] = Field(
         ...,
         min_length=1,

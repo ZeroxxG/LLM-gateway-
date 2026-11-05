@@ -110,6 +110,10 @@ CELERY_TASK_SERIALIZER: str = "json"
 CELERY_RESULT_SERIALIZER: str = "json"
 CELERY_TIMEZONE: str = "UTC"
 CELERY_TASK_TRACK_STARTED: bool = True
+CELERY_RESULT_EXTENDED: bool = True
+CELERY_TASK_ALWAYS_EAGER: bool = env.bool("CELERY_TASK_ALWAYS_EAGER", default=False)
+CELERY_TASK_EAGER_PROPAGATES: bool = True
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP: bool = True
 
 # ---------------------------------------------------------------------------
 # Internationalisation — disabled (pure API, no i18n)

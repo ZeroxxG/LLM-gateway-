@@ -10,11 +10,18 @@ Central Router:
   - Dispatches chat completions via dynamic routing, circuit breaking, and fallbacks.
   - Enforces distributed multi-tenant rate limiting (RPM/TPM) and FinOps budget quotas.
 """
+import asyncio
+from datetime import timedelta
+from decimal import Decimal
 import logging
-from typing import List, Optional
+import time
+from typing import Any, List, Optional
+import uuid
 
 from asgiref.sync import sync_to_async
+from celery.result import AsyncResult
 from django.http import HttpResponse, JsonResponse
+from django.utils import timezone
 from ninja import NinjaAPI
 from ninja.errors import HttpError
 
@@ -27,20 +34,27 @@ from gateway.adapters.exceptions import (
 )
 from gateway.adapters.schemas import ChatCompletionRequest, ChatCompletionResponse
 from gateway.health.router import router as health_router
-from gateway.models import ModelPricing, Tenant
+from gateway.models import DailyUsageAggregate, ModelPricing, RequestAuditLog, Tenant
 from gateway.ratelimit.budget import FinOpsBudgetManager
 from gateway.ratelimit.limiter import rate_limiter
 from gateway.routing.circuit_breaker import circuit_breaker
 from gateway.routing.orchestrator import RoutingOrchestrator
+from gateway.routing.router import DynamicRouter
 from gateway.schemas import (
+    AsyncTaskStatusOut,
+    AsyncTaskTriggerOut,
     AuthVerifyOut,
     BudgetTopUpIn,
     CircuitStatusOut,
+    DailyUsageAggregateOut,
     ModelPricingOut,
     RateLimitStatusOut,
+    RequestAuditLogOut,
     TenantOut,
+    TenantUsageAnalyticsOut,
 )
 from gateway.security import api_key_auth, api_key_header_auth
+from gateway.tasks import aggregate_daily_usage_task, dispatch_audit_log_async
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +63,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 api = NinjaAPI(
     title="Intelligent Multi-Model LLM Gateway",
-    version="5.0.0",
+    version="6.0.0",
     description=(
         "Enterprise-grade Intelligent Multi-Model LLM Gateway with Dynamic Routing, "
         "Fallbacks, and FinOps Controls.\n\n"
@@ -57,7 +71,8 @@ api = NinjaAPI(
         "- **Phase 2**: Multi-Tenant Isolation, SHA-256 Hashed API Key Auth & Token Pricing Catalog\n"
         "- **Phase 3**: Unified LLM Provider Adapters (Groq, Gemini, OpenAI, Mock) & Real-time FinOps Tracking\n"
         "- **Phase 4**: Dynamic Model Routing, Intelligent Fallbacks & Distributed Redis Circuit Breakers\n"
-        "- **Phase 5**: Distributed Rate Limiting (RPM/TPM) & FinOps Soft/Hard Budget Controls"
+        "- **Phase 5**: Distributed Rate Limiting (RPM/TPM) & FinOps Soft/Hard Budget Controls\n"
+        "- **Phase 6**: Celery Background Workers, Asynchronous Usage Aggregation & Analytics"
     ),
     docs_url="/docs",
     openapi_url="/openapi.json",
@@ -284,17 +299,37 @@ async def chat_completions(
         )
 
     # 3. Model Dispatch via Dynamic Routing Orchestrator
+    strategy_name = getattr(payload, "strategy", None) or DynamicRouter.detect_strategy(payload.model).value
+    start_time = time.time()
     try:
         completion_response = await RoutingOrchestrator.route_and_execute(
             request=payload,
             tenant=tenant,
         )
+        latency_ms = (time.time() - start_time) * 1000.0
 
         # 4. Post-flight TPM Rate Limiting
         total_tokens = completion_response.usage.total_tokens
         tpm_res = await rate_limiter.check_and_consume_tpm(tenant_id_str, tenant.tpm_limit, total_tokens)
 
-        # 5. Inject Standard RFC & FinOps Response Headers
+        # 5. Asynchronous Audit Logging via Celery (Non-blocking)
+        audit_payload = {
+            "tenant_id": tenant_id_str,
+            "request_id": completion_response.id,
+            "model_id": completion_response.model,
+            "provider": completion_response.provider,
+            "prompt_tokens": completion_response.usage.prompt_tokens,
+            "completion_tokens": completion_response.usage.completion_tokens,
+            "total_tokens": completion_response.usage.total_tokens,
+            "cost_usd": str(completion_response.cost_usd),
+            "latency_ms": round(latency_ms, 2),
+            "status_code": 200,
+            "routing_strategy": strategy_name,
+            "fallback_occurred": (completion_response.model != payload.model),
+        }
+        await dispatch_audit_log_async(audit_payload)
+
+        # 6. Inject Standard RFC & FinOps Response Headers
         response["X-RateLimit-Limit-RPM"] = str(rpm_res.limit)
         response["X-RateLimit-Remaining-RPM"] = str(rpm_res.remaining)
         response["X-RateLimit-Limit-TPM"] = str(tpm_res.limit)
@@ -307,15 +342,187 @@ async def chat_completions(
         return completion_response
 
     except ModelNotSupportedError as exc:
+        await dispatch_audit_log_async({
+            "tenant_id": tenant_id_str,
+            "request_id": f"err_{uuid.uuid4().hex[:12]}",
+            "model_id": payload.model,
+            "provider": "unknown",
+            "status_code": 400,
+            "error_message": str(exc),
+            "routing_strategy": strategy_name,
+        })
         raise HttpError(400, str(exc))
     except ProviderAuthError as exc:
+        await dispatch_audit_log_async({
+            "tenant_id": tenant_id_str,
+            "request_id": f"err_{uuid.uuid4().hex[:12]}",
+            "model_id": payload.model,
+            "provider": exc.provider,
+            "status_code": 502,
+            "error_message": exc.message,
+            "routing_strategy": strategy_name,
+        })
         raise HttpError(502, f"Upstream provider authentication failed: {exc.message}")
     except ProviderRateLimitError as exc:
+        await dispatch_audit_log_async({
+            "tenant_id": tenant_id_str,
+            "request_id": f"err_{uuid.uuid4().hex[:12]}",
+            "model_id": payload.model,
+            "provider": exc.provider,
+            "status_code": 429,
+            "error_message": exc.message,
+            "routing_strategy": strategy_name,
+        })
         raise HttpError(429, f"Upstream provider rate limit reached: {exc.message}")
     except ProviderTimeoutError as exc:
+        await dispatch_audit_log_async({
+            "tenant_id": tenant_id_str,
+            "request_id": f"err_{uuid.uuid4().hex[:12]}",
+            "model_id": payload.model,
+            "provider": exc.provider,
+            "status_code": 504,
+            "error_message": exc.message,
+            "routing_strategy": strategy_name,
+        })
         raise HttpError(504, f"Upstream provider request timed out: {exc.message}")
     except ProviderAPIError as exc:
+        await dispatch_audit_log_async({
+            "tenant_id": tenant_id_str,
+            "request_id": f"err_{uuid.uuid4().hex[:12]}",
+            "model_id": payload.model,
+            "provider": exc.provider,
+            "status_code": 502,
+            "error_message": exc.message,
+            "routing_strategy": strategy_name,
+        })
         raise HttpError(502, f"Upstream provider returned an error: {exc.message}")
     except Exception as exc:
         logger.exception("Unexpected error during chat completion execution: %s", exc)
         raise HttpError(500, f"Internal gateway error: {str(exc)}")
+
+
+# ---------------------------------------------------------------------------
+# Asynchronous Analytics & Background Worker Telemetry
+# ---------------------------------------------------------------------------
+
+
+@api.get(
+    "/analytics/usage",
+    auth=[api_key_auth, api_key_header_auth],
+    response=TenantUsageAnalyticsOut,
+    summary="Get Tenant Usage Analytics & Aggregates",
+    description="Returns aggregated token usage, request counts, and FinOps costs over a specified day window.",
+    tags=["Analytics & Background Workers"],
+)
+async def get_tenant_analytics(request, days: int = 7) -> TenantUsageAnalyticsOut:
+    """
+    Retrieves aggregated daily usage metrics for the authenticated tenant.
+    Reads from DailyUsageAggregate without expensive full table scans over millions of audit logs.
+    """
+    tenant: Tenant = request.auth
+    start_date = timezone.now().date() - timedelta(days=days)
+
+    daily_aggregates = []
+    total_requests = 0
+    total_tokens = 0
+    total_cost = Decimal("0.000000")
+
+    async for agg in DailyUsageAggregate.objects.filter(
+        tenant=tenant,
+        date__gte=start_date,
+    ).order_by("-date"):
+        daily_aggregates.append(DailyUsageAggregateOut.model_validate(agg))
+        total_requests += agg.total_requests
+        total_tokens += agg.total_tokens
+        total_cost += agg.total_cost_usd
+
+    return TenantUsageAnalyticsOut(
+        tenant_id=tenant.id,
+        tenant_name=tenant.name,
+        total_requests=total_requests,
+        total_tokens=total_tokens,
+        total_cost_usd=total_cost,
+        daily_breakdown=daily_aggregates,
+    )
+
+
+@api.get(
+    "/analytics/logs",
+    auth=[api_key_auth, api_key_header_auth],
+    response=List[RequestAuditLogOut],
+    summary="List Granular Request Audit Logs",
+    description="Retrieves paginated, immutable audit logs recorded asynchronously by Celery workers.",
+    tags=["Analytics & Background Workers"],
+)
+async def list_audit_logs(
+    request,
+    limit: int = 20,
+    offset: int = 0,
+    status_code: Optional[int] = None,
+) -> List[RequestAuditLogOut]:
+    """
+    Retrieves historical audit log entries for the tenant.
+    Supports filtering by HTTP status code and pagination via limit/offset.
+    """
+    tenant: Tenant = request.auth
+    qs = RequestAuditLog.objects.filter(tenant=tenant)
+    if status_code is not None:
+        qs = qs.filter(status_code=status_code)
+
+    logs = []
+    async for log in qs.order_by("-created_at")[offset : offset + limit]:
+        logs.append(RequestAuditLogOut.model_validate(log))
+    return logs
+
+
+@api.post(
+    "/analytics/aggregate",
+    auth=[api_key_auth, api_key_header_auth],
+    response=AsyncTaskTriggerOut,
+    summary="Trigger Daily Usage Aggregation Celery Task",
+    description="Queues an asynchronous Celery background task to roll up recent audit logs into daily aggregates.",
+    tags=["Analytics & Background Workers"],
+)
+async def trigger_aggregation(request, target_date: Optional[str] = None) -> AsyncTaskTriggerOut:
+    """Queues daily aggregation job via Celery worker without blocking ASGI thread."""
+    tenant: Tenant = request.auth
+    task = await asyncio.to_thread(aggregate_daily_usage_task.delay, target_date_str=target_date)
+    return AsyncTaskTriggerOut(
+        task_id=task.id,
+        status="PENDING",
+        message=f"Daily aggregation task queued for target date '{target_date or 'today'}'.",
+    )
+
+
+@api.get(
+    "/analytics/tasks/{task_id}",
+    auth=[api_key_auth, api_key_header_auth],
+    response=AsyncTaskStatusOut,
+    summary="Check Background Task Execution Status",
+    description="Queries Celery and Redis result backend to check completion and result payload of an async task.",
+    tags=["Analytics & Background Workers"],
+)
+async def get_task_status(request, task_id: str) -> AsyncTaskStatusOut:
+    """Non-blocking inspection of Celery task state from Redis result backend."""
+    tenant: Tenant = request.auth
+
+    def _inspect_task(tid: str):
+        async_res = AsyncResult(tid)
+        state = async_res.state
+        ready = async_res.ready()
+        successful = async_res.successful() if ready else False
+        result = async_res.result if ready else None
+        if isinstance(result, Exception):
+            result = str(result)
+        return state, ready, successful, result
+
+    state, ready, successful, result = await asyncio.to_thread(_inspect_task, task_id)
+
+    return AsyncTaskStatusOut(
+        task_id=task_id,
+        status=state,
+        ready=ready,
+        successful=successful,
+        result=result,
+    )
+

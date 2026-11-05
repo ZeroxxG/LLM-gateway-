@@ -5,8 +5,9 @@ Pydantic v2 schemas for Tenant, Authentication, and Model Pricing.
 
 Enforces strict type safety and auto-generates OpenAPI documentation.
 """
+from datetime import date as DateType, datetime as DateTimeType
 from decimal import Decimal
-from typing import List, Optional
+from typing import Any, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -73,3 +74,69 @@ class RateLimitStatusOut(BaseModel):
     tpm_limit: int = Field(..., description="Tokens per minute limit.")
     tpm_remaining: int = Field(..., description="Remaining tokens allowed in current window.")
     window_reset_seconds: int = Field(..., description="Seconds until window counter resets.")
+
+
+class RequestAuditLogOut(BaseModel):
+    """Granular execution audit log record schema."""
+
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+
+    id: UUID = Field(..., description="Audit log entry unique identifier.")
+    request_id: str = Field(..., description="Traced request ID.")
+    model_id: str = Field(..., description="Target model executed.")
+    provider: str = Field(..., description="Target provider.")
+    prompt_tokens: int = Field(..., description="Prompt tokens consumed.")
+    completion_tokens: int = Field(..., description="Generated completion tokens.")
+    total_tokens: int = Field(..., description="Total tokens.")
+    cost_usd: Decimal = Field(..., description="Calculated FinOps cost.")
+    latency_ms: float = Field(..., description="Execution latency in milliseconds.")
+    status_code: int = Field(..., description="HTTP status code returned.")
+    error_message: Optional[str] = Field(None, description="Error message if failed or retried.")
+    routing_strategy: str = Field(..., description="Strategy used to route request.")
+    fallback_occurred: bool = Field(..., description="Whether fallback routing took place.")
+    created_at: DateTimeType = Field(..., description="Timestamp of request completion.")
+
+
+class DailyUsageAggregateOut(BaseModel):
+    """Aggregated usage metrics for a specific calendar day."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    date: DateType = Field(..., description="Calendar date of aggregate.")
+    total_requests: int = Field(..., description="Total requests processed on this day.")
+    successful_requests: int = Field(..., description="Successful (200 OK) requests.")
+    failed_requests: int = Field(..., description="Failed requests.")
+    total_prompt_tokens: int = Field(..., description="Sum of prompt tokens.")
+    total_completion_tokens: int = Field(..., description="Sum of completion tokens.")
+    total_tokens: int = Field(..., description="Total tokens consumed.")
+    total_cost_usd: Decimal = Field(..., description="Total FinOps cost in USD.")
+
+
+class TenantUsageAnalyticsOut(BaseModel):
+    """Comprehensive analytics summary for the authenticated tenant."""
+
+    tenant_id: UUID = Field(..., description="Tenant ID.")
+    tenant_name: str = Field(..., description="Tenant name.")
+    total_requests: int = Field(..., description="Total requests across the selected period.")
+    total_tokens: int = Field(..., description="Total tokens consumed across the period.")
+    total_cost_usd: Decimal = Field(..., description="Total cost incurred across the period.")
+    daily_breakdown: List[DailyUsageAggregateOut] = Field(..., description="Day-by-day aggregate breakdown.")
+
+
+class AsyncTaskTriggerOut(BaseModel):
+    """Response returned when an async Celery background task is queued."""
+
+    task_id: str = Field(..., description="Unique Celery Task UUID.")
+    status: str = Field(..., description="Initial task status (e.g. PENDING).")
+    message: str = Field(..., description="Human-readable description of scheduled work.")
+
+
+class AsyncTaskStatusOut(BaseModel):
+    """Status and result of an async Celery background task."""
+
+    task_id: str = Field(..., description="Unique Celery Task UUID.")
+    status: str = Field(..., description="Current Celery status (PENDING, STARTED, SUCCESS, FAILURE).")
+    ready: bool = Field(..., description="Whether task execution has finished.")
+    successful: bool = Field(..., description="Whether task execution succeeded without unhandled errors.")
+    result: Optional[Any] = Field(None, description="Task return value or error detail.")
+
