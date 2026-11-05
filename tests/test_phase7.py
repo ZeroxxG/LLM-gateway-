@@ -14,6 +14,7 @@ from decimal import Decimal
 import os
 import sys
 import uuid
+import pytest
 
 # Ensure repository root is on sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,12 +27,12 @@ django.setup()
 
 from config.asgi import application
 from gateway.adapters.base import close_shared_http_client
-from gateway.models import APIKey, Tenant
+from gateway.models import APIKey, ModelPricing, ModelTier, Tenant
 from gateway.ratelimit.budget import FinOpsBudgetManager
 from gateway.security import generate_api_key
 from gateway.utils.redis import close_redis_client, get_redis_client
 
-
+@pytest.mark.django_db(transaction=True)
 async def test_full_phase7_suite():
     print("\n--- Running Phase 7 Real-Time Redis Budget Tracking & Hard-Stop Tests ---")
 
@@ -98,6 +99,17 @@ async def test_full_phase7_suite():
         hashed_key=hashed,
         name="Phase 7 Test Key",
         is_active=True,
+    )
+
+    await ModelPricing.objects.aupdate_or_create(
+        model_id="mock/test-model",
+        defaults={
+            "provider": "mock",
+            "input_cost_per_million": Decimal("0.1000"),
+            "output_cost_per_million": Decimal("0.2000"),
+            "tier": ModelTier.SMALL,
+            "is_active": True,
+        },
     )
 
     # Reset any cached keys for this tenant in Redis
