@@ -415,10 +415,7 @@ async def chat_completions(
     tags=["Analytics & Background Workers"],
 )
 async def get_tenant_analytics(request, days: int = 7) -> TenantUsageAnalyticsOut:
-    """
-    Retrieves aggregated daily usage metrics for the authenticated tenant.
-    Reads from DailyUsageAggregate without expensive full table scans over millions of audit logs.
-    """
+    """Return daily usage and token stats for this tenant."""
     tenant: Tenant = request.auth
     start_date = timezone.now().date() - timedelta(days=days)
 
@@ -460,10 +457,7 @@ async def list_audit_logs(
     offset: int = 0,
     status_code: Optional[int] = None,
 ) -> List[RequestAuditLogOut]:
-    """
-    Retrieves historical audit log entries for the tenant.
-    Supports filtering by HTTP status code and pagination via limit/offset.
-    """
+    """Return recent request logs for this tenant."""
     tenant: Tenant = request.auth
     qs = RequestAuditLog.objects.filter(tenant=tenant)
     if status_code is not None:
@@ -484,7 +478,7 @@ async def list_audit_logs(
     tags=["Analytics & Background Workers"],
 )
 async def trigger_aggregation(request, target_date: Optional[str] = None) -> AsyncTaskTriggerOut:
-    """Queues daily aggregation job via Celery worker without blocking ASGI thread."""
+    """Queue a background task to roll up daily stats."""
     tenant: Tenant = request.auth
     task = await asyncio.to_thread(aggregate_daily_usage_task.delay, target_date_str=target_date)
     return AsyncTaskTriggerOut(
@@ -503,7 +497,7 @@ async def trigger_aggregation(request, target_date: Optional[str] = None) -> Asy
     tags=["Analytics & Background Workers"],
 )
 async def get_task_status(request, task_id: str) -> AsyncTaskStatusOut:
-    """Non-blocking inspection of Celery task state from Redis result backend."""
+    """Check task status from Celery and Redis."""
     tenant: Tenant = request.auth
 
     def _inspect_task(tid: str):

@@ -1,11 +1,11 @@
 """
 gateway/tasks.py
 ================
-Asynchronous Background Celery Tasks for LLM Gateway:
-  - Asynchronous Usage & Audit Logging (offloaded from ASGI event loop)
-  - Daily Usage Metrics Aggregation Rollup
-  - FinOps Tenant Budget Reconciliation & Drift Detection
-  - Audit Log Lifecycle Retention Pruning
+Background tasks for logging and usage stats:
+  - Save request logs
+  - Aggregate daily usage
+  - Check budget balance
+  - Clean up old logs
 """
 import asyncio
 from datetime import date, datetime, timedelta
@@ -31,10 +31,7 @@ logger = logging.getLogger(__name__)
     acks_late=True,
 )
 def log_request_usage_task(self, audit_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Asynchronously persists a RequestAuditLog record in PostgreSQL.
-    Executed in the background by Celery workers to keep ASGI request-response latency ultra-low.
-    """
+    """Save request log to database in the background."""
     try:
         tenant_id = audit_data["tenant_id"]
         tenant = Tenant.objects.get(pk=tenant_id)
@@ -85,10 +82,7 @@ def log_request_usage_task(self, audit_data: Dict[str, Any]) -> Dict[str, Any]:
 
 @shared_task(name="gateway.tasks.aggregate_daily_usage_task", acks_late=True)
 def aggregate_daily_usage_task(target_date_str: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Rolls up RequestAuditLog records for a specific day into DailyUsageAggregate rows.
-    Enables instant analytics queries without scanning millions of granular audit log rows.
-    """
+    """Roll up daily request counts and token totals for each tenant."""
     if target_date_str:
         target_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
     else:
@@ -145,10 +139,7 @@ def aggregate_daily_usage_task(target_date_str: Optional[str] = None) -> Dict[st
 
 @shared_task(name="gateway.tasks.reconcile_tenant_budgets_task", acks_late=True)
 def reconcile_tenant_budgets_task() -> Dict[str, Any]:
-    """
-    FinOps audit job: Compares aggregate audit log spending with Tenant.current_spend_usd.
-    Identifies any discrepancies or drift between logged requests and tenant balance.
-    """
+    """Check that tenant spend matches the sum of logged request costs."""
     active_tenants = Tenant.objects.filter(is_active=True)
     reconciled_results = []
     discrepancies_found = 0
@@ -166,7 +157,7 @@ def reconcile_tenant_budgets_task() -> Dict[str, Any]:
         if has_drift:
             discrepancies_found += 1
             logger.warning(
-                "FinOps budget drift detected for tenant '%s': spend=$%s vs logged=$%s (drift=$%s)",
+                "Budget drift detected for tenant '%s': spend=$%s vs logged=$%s (drift=$%s)",
                 tenant.name,
                 spend_dec,
                 logged_dec,
@@ -192,9 +183,7 @@ def reconcile_tenant_budgets_task() -> Dict[str, Any]:
 
 @shared_task(name="gateway.tasks.cleanup_old_audit_logs_task", acks_late=True)
 def cleanup_old_audit_logs_task(retention_days: int = 30) -> Dict[str, Any]:
-    """
-    Maintenance task to prune RequestAuditLog rows older than the specified retention period.
-    """
+    """Delete audit logs older than the retention limit."""
     cutoff = timezone.now() - timedelta(days=retention_days)
     deleted_count, _ = RequestAuditLog.objects.filter(created_at__lt=cutoff).delete()
     logger.info("Cleaned up %d audit logs older than %d days (cutoff: %s)", deleted_count, retention_days, cutoff)
@@ -206,10 +195,7 @@ def cleanup_old_audit_logs_task(retention_days: int = 30) -> Dict[str, Any]:
 
 
 async def dispatch_audit_log_async(audit_data: Dict[str, Any]) -> None:
-    """
-    Pure async helper to dispatch audit log recording to Celery without blocking ASGI event loop.
-    Uses asyncio.to_thread to run kombu Redis LPUSH safely in a worker thread.
-    """
+    """Send audit log task to Celery in a worker thread."""
     try:
         await asyncio.to_thread(log_request_usage_task.delay, audit_data)
     except Exception as exc:
