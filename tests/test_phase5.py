@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import django
 import httpx
+import pytest
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")
 django.setup()
@@ -30,10 +31,13 @@ from gateway.models import APIKey, Tenant
 from gateway.ratelimit.budget import FinOpsBudgetManager
 from gateway.ratelimit.limiter import DistributedRateLimiter, rate_limiter
 from gateway.security import generate_api_key
+from tests.test_helpers import ensure_seed_data
 
 
+@pytest.mark.django_db(transaction=True)
 async def test_full_phase5_suite():
     print("\n--- Running Phase 5 Distributed Rate Limiting & FinOps Budget Tests ---")
+    await ensure_seed_data()
 
     # 1. RPM Sliding Window Rate Limiter Tests
     test_limiter = DistributedRateLimiter(window_seconds=60)

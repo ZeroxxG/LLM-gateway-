@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import django
 import httpx
+import pytest
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")
 # Enable eager mode so Celery tasks can execute synchronously during tests when needed
@@ -49,10 +50,13 @@ from gateway.tasks import (
     reconcile_tenant_budgets_task,
 )
 from gateway.utils.redis import close_redis_client
+from tests.test_helpers import ensure_seed_data
 
 
+@pytest.mark.django_db(transaction=True)
 async def test_full_phase6_suite():
     print("\n--- Running Phase 6 Celery Workers & Asynchronous Usage Aggregation Tests ---")
+    await ensure_seed_data()
 
     # 1. Setup isolated test Tenant
     tenant_name = f"Celery Test Corp {uuid.uuid4().hex[:6]}"

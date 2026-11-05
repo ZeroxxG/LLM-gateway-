@@ -31,10 +31,12 @@ from gateway.models import APIKey, ModelPricing, ModelTier, Tenant
 from gateway.ratelimit.budget import FinOpsBudgetManager
 from gateway.security import generate_api_key
 from gateway.utils.redis import close_redis_client, get_redis_client
+from tests.test_helpers import ensure_seed_data
 
 @pytest.mark.django_db(transaction=True)
 async def test_full_phase7_suite():
     print("\n--- Running Phase 7 Real-Time Redis Budget Tracking & Hard-Stop Tests ---")
+    await ensure_seed_data()
 
     # 1. Direct Redis INCRBYFLOAT Lua tests
     tenant_id = uuid.uuid4()

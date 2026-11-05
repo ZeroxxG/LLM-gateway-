@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import django
 import httpx
+import pytest
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")
 django.setup()
@@ -23,9 +24,12 @@ django.setup()
 from config.asgi import application
 from gateway.models import APIKey, ModelPricing, Tenant
 from gateway.security import generate_api_key, hash_api_key, verify_api_key_async
+from tests.test_helpers import ensure_seed_data, KNOWN_TEST_KEY
 
 
+@pytest.mark.django_db(transaction=True)
 async def test_full_phase2_flow():
+    await ensure_seed_data()
     # 1. Fetch test tenant and its active key
     tenant = await Tenant.objects.aget(name="Acme Global (Test Org)")
     api_key_obj = await APIKey.objects.filter(tenant=tenant, is_active=True).afirst()

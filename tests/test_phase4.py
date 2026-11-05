@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import django
 import httpx
+import pytest
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")
 django.setup()
@@ -32,6 +33,7 @@ from gateway.models import APIKey, ModelPricing, Tenant
 from gateway.routing.circuit_breaker import CircuitState, RedisCircuitBreaker, circuit_breaker
 from gateway.routing.orchestrator import RoutingOrchestrator
 from gateway.routing.router import DynamicRouter, RoutingStrategy
+from tests.test_helpers import ensure_seed_data
 
 
 class FailingMockAdapter(BaseProviderAdapter):
@@ -43,8 +45,10 @@ class FailingMockAdapter(BaseProviderAdapter):
         raise ProviderAPIError("Simulated upstream provider outage (HTTP 503)", provider=self.provider_name, status_code=503)
 
 
+@pytest.mark.django_db(transaction=True)
 async def test_full_phase4_suite():
     print("\n--- Running Phase 4 Dynamic Routing, Circuit Breaker & Fallback Tests ---")
+    await ensure_seed_data()
 
     # 1. Dynamic Router Strategy Detection
     assert DynamicRouter.detect_strategy("cost_optimized") == RoutingStrategy.COST_OPTIMIZED

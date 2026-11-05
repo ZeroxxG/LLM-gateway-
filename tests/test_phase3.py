@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import django
 import httpx
+import pytest
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")
 django.setup()
@@ -30,10 +31,13 @@ from gateway.adapters.gemini import GeminiAdapter
 from gateway.adapters.mock import MockAdapter
 from gateway.adapters.schemas import ChatCompletionRequest, ChatMessage
 from gateway.models import APIKey, ModelPricing, ModelTier, Tenant
+from tests.test_helpers import ensure_seed_data
 
 
+@pytest.mark.django_db(transaction=True)
 async def test_full_phase3_suite():
     print("\n--- Running Phase 3 Provider Adapters & Execution Tests ---")
+    await ensure_seed_data()
 
     # 1. Fetch test tenant and API key
     tenant = await Tenant.objects.aget(name="Acme Global (Test Org)")
