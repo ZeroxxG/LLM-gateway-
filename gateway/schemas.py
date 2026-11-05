@@ -12,6 +12,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from gateway.adapters.schemas import ChatMessage
+
 
 class TenantOut(BaseModel):
     """Authenticated Tenant response schema."""
@@ -158,4 +160,44 @@ class AsyncTaskStatusOut(BaseModel):
     ready: bool = Field(..., description="Whether task execution has finished.")
     successful: bool = Field(..., description="Whether task execution succeeded without unhandled errors.")
     result: Optional[Any] = Field(None, description="Task return value or error detail.")
+
+
+class CandidateScoreOut(BaseModel):
+    """Scored evaluation result for a single model candidate."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_id: str = Field(..., description="Canonical model identifier.")
+    provider: str = Field(..., description="Upstream provider.")
+    score: float = Field(..., description="Composite heuristic score (0 to 100).")
+    capability_score: float = Field(..., description="Capability match score for task type.")
+    latency_score: float = Field(..., description="Latency score.")
+    cost_score: float = Field(..., description="Cost efficiency score.")
+    estimated_cost_usd: Decimal = Field(..., description="Estimated cost in USD.")
+    typical_latency_ms: float = Field(..., description="Benchmark typical latency in ms.")
+    eligible: bool = Field(..., description="Whether candidate satisfies all constraints.")
+    rejection_reason: Optional[str] = Field(None, description="Reason candidate was rejected or pruned.")
+
+
+class RoutingEvaluationIn(BaseModel):
+    """Request payload to test or dry-run heuristic routing."""
+
+    messages: List[ChatMessage] = Field(..., min_length=1, description="Sample conversation messages.")
+    task_type: Optional[str] = Field(None, description="Explicit task type override.")
+    latency_sla_ms: Optional[float] = Field(None, gt=0.0, description="Latency SLA threshold in ms.")
+    max_cost_usd: Optional[Decimal] = Field(None, gt=Decimal("0.00"), description="Budget limit in USD.")
+    strategy: Optional[str] = Field("heuristic", description="Routing strategy name.")
+
+
+class RoutingEvaluationOut(BaseModel):
+    """Diagnostic response from the heuristic routing engine."""
+
+    detected_task_type: str = Field(..., description="Detected or specified task type.")
+    estimated_tokens: int = Field(..., description="Estimated prompt token count.")
+    decision_latency_ms: float = Field(..., description="Decision engine execution time in milliseconds.")
+    selected_model: str = Field(..., description="Top recommended model.")
+    candidate_chain: List[str] = Field(..., description="Ranked list of eligible models.")
+    candidates: List[CandidateScoreOut] = Field(..., description="Detailed candidate evaluations.")
+    strategy_used: str = Field("heuristic", description="Routing policy used.")
+
 

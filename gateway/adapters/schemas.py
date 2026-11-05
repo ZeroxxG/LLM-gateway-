@@ -7,7 +7,7 @@ Enforces strict type safety across all upstream providers (Groq, Gemini, OpenAI)
 Every incoming request and outgoing response is normalized to this canonical schema.
 """
 from decimal import Decimal
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 import time
 
@@ -39,7 +39,21 @@ class ChatCompletionRequest(BaseModel):
     )
     strategy: Optional[str] = Field(
         default=None,
-        description="Optional routing strategy override (e.g. 'cost_optimized', 'latency_optimized', 'quality_optimized').",
+        description="Optional routing strategy override (e.g. 'cost_optimized', 'latency_optimized', 'quality_optimized', 'heuristic', 'auto').",
+    )
+    task_type: Optional[str] = Field(
+        default=None,
+        description="Explicit task classification (e.g. 'coding', 'reasoning', 'creative', 'extraction', 'summarization', 'chat').",
+    )
+    latency_sla_ms: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description="Maximum acceptable latency SLA constraint in milliseconds.",
+    )
+    max_cost_usd: Optional[Decimal] = Field(
+        default=None,
+        gt=Decimal("0.00000000"),
+        description="Maximum FinOps cost ceiling in USD for this single query.",
     )
     messages: List[ChatMessage] = Field(
         ...,
@@ -108,4 +122,8 @@ class ChatCompletionResponse(BaseModel):
     latency_ms: float = Field(
         ...,
         description="Total round-trip latency to the upstream provider in milliseconds.",
+    )
+    routing_decision: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Diagnostic metadata from the heuristic decision engine.",
     )

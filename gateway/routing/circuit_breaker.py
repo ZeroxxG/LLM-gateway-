@@ -92,6 +92,21 @@ class RedisCircuitBreaker:
 
         return current_state
 
+    async def get_all_states(self, providers: List[str]) -> Dict[str, CircuitState]:
+        """
+        Retrieves circuit states for multiple providers in a single round-trip (mget).
+        """
+        redis = await get_redis_client()
+        provider_keys = [p.lower() for p in providers]
+        keys = [self._state_key(p) for p in provider_keys]
+        values = await redis.mget(keys)
+
+        results: Dict[str, CircuitState] = {}
+        for p, val in zip(provider_keys, values):
+            results[p] = CircuitState(val) if val else CircuitState.CLOSED
+
+        return results
+
     async def can_execute(self, provider: str) -> bool:
         """
         Check if a request is permitted to call the provider.

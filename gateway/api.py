@@ -38,6 +38,7 @@ from gateway.models import DailyUsageAggregate, ModelPricing, RequestAuditLog, T
 from gateway.ratelimit.budget import FinOpsBudgetManager
 from gateway.ratelimit.limiter import rate_limiter
 from gateway.routing.circuit_breaker import circuit_breaker
+from gateway.routing.heuristics import HeuristicRouter
 from gateway.routing.orchestrator import RoutingOrchestrator
 from gateway.routing.router import DynamicRouter
 from gateway.schemas import (
@@ -46,12 +47,15 @@ from gateway.schemas import (
     AuthVerifyOut,
     BudgetSyncOut,
     BudgetTopUpIn,
+    CandidateScoreOut,
     CircuitStatusOut,
     DailyUsageAggregateOut,
     ModelPricingOut,
     RateLimitStatusOut,
     RealtimeBudgetStatusOut,
     RequestAuditLogOut,
+    RoutingEvaluationIn,
+    RoutingEvaluationOut,
     TenantOut,
     TenantUsageAnalyticsOut,
 )
@@ -274,6 +278,53 @@ async def reset_circuit_breaker(request, provider: str) -> dict:
     return {"status": "success", "provider": provider.lower(), "state": "CLOSED"}
 
 
+@api.post(
+    "/routing/evaluate",
+    auth=[api_key_auth, api_key_header_auth],
+    response=RoutingEvaluationOut,
+    summary="Evaluate Heuristic Routing Decision",
+    description=(
+        "Simulates sub-2ms heuristic routing without executing LLM completions. "
+        "Returns detected task type, context token estimate, decision latency, "
+        "and candidate model scoring breakdowns."
+    ),
+    tags=["Dynamic Routing & Resiliency"],
+)
+async def evaluate_heuristic_routing(request, payload: RoutingEvaluationIn) -> RoutingEvaluationOut:
+    """Evaluates heuristic routing in < 2ms."""
+    tenant: Tenant = request.auth
+    result = await HeuristicRouter.evaluate_routing(
+        messages=payload.messages,
+        task_type_override=payload.task_type,
+        latency_sla_ms=payload.latency_sla_ms,
+        max_cost_usd=payload.max_cost_usd,
+        tenant=tenant,
+    )
+    return RoutingEvaluationOut(
+        detected_task_type=result.detected_task_type.value,
+        estimated_tokens=result.estimated_tokens,
+        decision_latency_ms=result.decision_latency_ms,
+        selected_model=result.selected_model,
+        candidate_chain=result.candidate_chain,
+        candidates=[
+            CandidateScoreOut(
+                model_id=c.model_id,
+                provider=c.provider,
+                score=c.score,
+                capability_score=c.capability_score,
+                latency_score=c.latency_score,
+                cost_score=c.cost_score,
+                estimated_cost_usd=c.estimated_cost_usd,
+                typical_latency_ms=c.typical_latency_ms,
+                eligible=c.eligible,
+                rejection_reason=c.rejection_reason,
+            )
+            for c in result.candidates
+        ],
+        strategy_used=result.strategy_used,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Unified Chat Completion Execution Engine (Rate Limiting + Budget + Routing)
 # ---------------------------------------------------------------------------
@@ -386,6 +437,17 @@ async def chat_completions(
 
         if budget_eval.warning_header:
             response["X-Budget-Warning"] = budget_eval.warning_header
+
+        # 7. Inject Heuristic Routing Diagnostic Headers
+        if completion_response.routing_decision:
+            rd = completion_response.routing_decision
+            response["X-Routing-Strategy"] = str(rd.get("strategy", strategy_name))
+            response["X-Routing-Task-Type"] = str(rd.get("detected_task_type", "general"))
+            response["X-Routing-Decision-Latency-Ms"] = str(rd.get("decision_latency_ms", "0.0"))
+            response["X-Routing-Selected-Model"] = str(rd.get("selected_model", completion_response.model))
+        else:
+            response["X-Routing-Strategy"] = strategy_name
+            response["X-Routing-Selected-Model"] = completion_response.model
 
         return completion_response
 

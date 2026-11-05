@@ -45,7 +45,15 @@ class RoutingOrchestrator:
         Raises:
             ProviderAPIError: If all candidate models in the fallback chain fail.
         """
-        candidate_chain = await DynamicRouter.resolve_candidate_chain(request.model)
+        target = getattr(request, "strategy", None) or request.model
+        candidate_chain, heuristic_decision = await DynamicRouter.resolve_detailed(
+            model_target=target,
+            messages=request.messages,
+            task_type=getattr(request, "task_type", None),
+            latency_sla_ms=getattr(request, "latency_sla_ms", None),
+            max_cost_usd=getattr(request, "max_cost_usd", None),
+            tenant=tenant,
+        )
         primary_model = candidate_chain[0] if candidate_chain else request.model
 
         attempted_trace: List[Dict[str, Any]] = []
@@ -99,6 +107,16 @@ class RoutingOrchestrator:
                         candidate_model,
                         provider_name,
                     )
+
+                if heuristic_decision:
+                    response.routing_decision = {
+                        "selected_model": heuristic_decision.selected_model,
+                        "detected_task_type": heuristic_decision.detected_task_type.value,
+                        "estimated_tokens": heuristic_decision.estimated_tokens,
+                        "decision_latency_ms": heuristic_decision.decision_latency_ms,
+                        "strategy": heuristic_decision.strategy_used,
+                        "candidate_chain": heuristic_decision.candidate_chain,
+                    }
 
                 return response
 
