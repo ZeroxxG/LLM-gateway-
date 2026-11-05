@@ -66,6 +66,25 @@ class BudgetTopUpIn(BaseModel):
     additional_budget_usd: Decimal = Field(..., gt=Decimal("0.00"), description="Additional budget in USD to add.")
 
 
+class RealtimeBudgetStatusOut(BaseModel):
+    """Real-time budget standing from Redis."""
+
+    tenant_id: UUID = Field(..., description="Tenant unique identifier.")
+    monthly_budget_usd: Decimal = Field(..., description="Monthly spending limit in USD.")
+    current_spend_usd: Decimal = Field(..., description="Accumulated spend in Redis.")
+    remaining_budget_usd: Decimal = Field(..., description="Remaining budget in USD.")
+    percentage_consumed: float = Field(..., description="Percentage of monthly budget consumed.")
+    is_locked_out: bool = Field(..., description="Whether tenant is locked out due to budget limit.")
+
+
+class BudgetSyncOut(BaseModel):
+    """Result of syncing Redis spend to database."""
+
+    tenant_id: UUID = Field(..., description="Tenant unique identifier.")
+    synced_spend_usd: Decimal = Field(..., description="Spend value synced to PostgreSQL.")
+    status: str = Field("synced", description="Sync status.")
+
+
 class RateLimitStatusOut(BaseModel):
     """Current rate limit status and remaining quota for tenant."""
 

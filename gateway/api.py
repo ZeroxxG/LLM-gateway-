@@ -44,11 +44,13 @@ from gateway.schemas import (
     AsyncTaskStatusOut,
     AsyncTaskTriggerOut,
     AuthVerifyOut,
+    BudgetSyncOut,
     BudgetTopUpIn,
     CircuitStatusOut,
     DailyUsageAggregateOut,
     ModelPricingOut,
     RateLimitStatusOut,
+    RealtimeBudgetStatusOut,
     RequestAuditLogOut,
     TenantOut,
     TenantUsageAnalyticsOut,
@@ -63,7 +65,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 api = NinjaAPI(
     title="Intelligent Multi-Model LLM Gateway",
-    version="6.0.0",
+    version="7.0.0",
     description=(
         "Enterprise-grade Intelligent Multi-Model LLM Gateway with Dynamic Routing, "
         "Fallbacks, and FinOps Controls.\n\n"
@@ -72,7 +74,8 @@ api = NinjaAPI(
         "- **Phase 3**: Unified LLM Provider Adapters (Groq, Gemini, OpenAI, Mock) & Real-time FinOps Tracking\n"
         "- **Phase 4**: Dynamic Model Routing, Intelligent Fallbacks & Distributed Redis Circuit Breakers\n"
         "- **Phase 5**: Distributed Rate Limiting (RPM/TPM) & FinOps Soft/Hard Budget Controls\n"
-        "- **Phase 6**: Celery Background Workers, Asynchronous Usage Aggregation & Analytics"
+        "- **Phase 6**: Celery Background Workers, Asynchronous Usage Aggregation & Analytics\n"
+        "- **Phase 7**: Real-Time Budget Enforcement – Atomic Redis spend tracking (INCRBYFLOAT) & hard-stop 402 rejection"
     ),
     docs_url="/docs",
     openapi_url="/openapi.json",
@@ -146,6 +149,47 @@ async def top_up_budget(request, payload: BudgetTopUpIn) -> TenantOut:
     tenant: Tenant = request.auth
     updated_tenant = await FinOpsBudgetManager.top_up_budget(tenant.id, payload.additional_budget_usd)
     return TenantOut.model_validate(updated_tenant)
+
+
+@api.get(
+    "/tenant/budget",
+    auth=[api_key_auth, api_key_header_auth],
+    response=RealtimeBudgetStatusOut,
+    summary="Get Real-Time Redis Budget Standing",
+    description="Returns real-time tenant budget cap, spend accumulated in Redis via INCRBYFLOAT, and lockout state.",
+    tags=["Authentication & Tenancy"],
+)
+async def get_realtime_budget(request) -> RealtimeBudgetStatusOut:
+    """Check live budget standing from Redis."""
+    tenant: Tenant = request.auth
+    data = await FinOpsBudgetManager.get_realtime_budget(tenant.id)
+    return RealtimeBudgetStatusOut(
+        tenant_id=tenant.id,
+        monthly_budget_usd=data["monthly_budget_usd"],
+        current_spend_usd=data["current_spend_usd"],
+        remaining_budget_usd=data["remaining_budget_usd"],
+        percentage_consumed=data["percentage_consumed"],
+        is_locked_out=data["is_locked_out"],
+    )
+
+
+@api.post(
+    "/tenant/budget/sync",
+    auth=[api_key_auth, api_key_header_auth],
+    response=BudgetSyncOut,
+    summary="Sync Redis Spend to PostgreSQL Database",
+    description="Flushes accumulated Redis spend back to the tenant record in PostgreSQL.",
+    tags=["Authentication & Tenancy"],
+)
+async def sync_budget_to_db(request) -> BudgetSyncOut:
+    """Sync Redis spend to PostgreSQL."""
+    tenant: Tenant = request.auth
+    synced_tenant = await FinOpsBudgetManager.sync_spend_to_db(tenant.id)
+    return BudgetSyncOut(
+        tenant_id=synced_tenant.id,
+        synced_spend_usd=synced_tenant.current_spend_usd,
+        status="synced",
+    )
 
 
 @api.get(
@@ -263,19 +307,19 @@ async def chat_completions(
     tenant: Tenant = request.auth
     tenant_id_str = str(tenant.id)
 
-    # 1. FinOps Pre-flight Budget Guard
-    budget_eval = FinOpsBudgetManager.evaluate_budget(tenant)
+    # 1. FinOps Pre-flight Real-Time Budget Guard (Sub-millisecond in Redis)
+    budget_eval = await FinOpsBudgetManager.evaluate_budget_realtime(tenant)
     if not budget_eval.allowed:
         logger.warning(
             "Tenant '%s' blocked by FinOps hard budget lockout ($%s / $%s)",
             tenant.name,
-            tenant.current_spend_usd,
-            tenant.monthly_budget_usd,
+            budget_eval.current_spend_usd,
+            budget_eval.monthly_budget_usd,
         )
         raise HttpError(
             402,
-            f"Tenant monthly spending budget exceeded (${tenant.current_spend_usd} / ${tenant.monthly_budget_usd}). "
-            "Operation blocked by FinOps policy. Top up budget to resume access.",
+            f"Tenant monthly spending budget exceeded (${budget_eval.current_spend_usd} / ${budget_eval.monthly_budget_usd}). "
+            "Operation blocked by FinOps real-time policy. Top up budget to resume access.",
         )
 
     # 2. Redis-backed RPM Rate Limiting Guard
@@ -335,6 +379,10 @@ async def chat_completions(
         response["X-RateLimit-Limit-TPM"] = str(tpm_res.limit)
         response["X-RateLimit-Remaining-TPM"] = str(tpm_res.remaining)
         response["X-RateLimit-Reset"] = str(rpm_res.reset_seconds)
+
+        response["X-Budget-Limit"] = str(budget_eval.monthly_budget_usd)
+        response["X-Budget-Current-Spend"] = str(budget_eval.current_spend_usd)
+        response["X-Budget-Remaining"] = str(budget_eval.remaining_usd)
 
         if budget_eval.warning_header:
             response["X-Budget-Warning"] = budget_eval.warning_header

@@ -104,5 +104,7 @@ class ProviderFactory:
                 await Tenant.objects.filter(pk=tenant.pk).aupdate(
                     current_spend_usd=F("current_spend_usd") + cost
                 )
+                from gateway.ratelimit.budget import FinOpsBudgetManager
+                await FinOpsBudgetManager.record_spend_atomic(tenant.id, cost, tenant.monthly_budget_usd)
 
         return response
