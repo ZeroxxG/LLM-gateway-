@@ -47,6 +47,7 @@ Usage:
     await client.set("key", "value", ex=60)
     value = await client.get("key")   # Returns str, not bytes
 """
+import asyncio
 import logging
 from typing import Optional
 
@@ -57,6 +58,7 @@ logger = logging.getLogger(__name__)
 
 # Process-level singleton — one connection pool per Uvicorn worker process
 _redis_client: Optional[aioredis.Redis] = None
+_redis_client_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 async def get_redis_client() -> aioredis.Redis:
@@ -72,7 +74,12 @@ async def get_redis_client() -> aioredis.Redis:
     Returns:
         aioredis.Redis: Configured async Redis client backed by a connection pool.
     """
-    global _redis_client
+    global _redis_client, _redis_client_loop
+
+    current_loop = asyncio.get_running_loop()
+    if _redis_client is not None and (_redis_client_loop is not current_loop or _redis_client_loop.is_closed()):
+        logger.debug("Redis client was created on a different or closed event loop. Re-initialising.")
+        _redis_client = None
 
     if _redis_client is None:
         logger.debug("Initialising async Redis client → %s", settings.REDIS_URL)
@@ -86,6 +93,7 @@ async def get_redis_client() -> aioredis.Redis:
             max_connections=50,         # Connection pool cap per worker
             health_check_interval=30,   # Ping idle connections every 30 s
         )
+        _redis_client_loop = current_loop
         logger.info("Async Redis client initialised (pool max=%d)", 50)
 
     return _redis_client
@@ -98,17 +106,19 @@ async def close_redis_client() -> None:
     Call this during ASGI lifespan shutdown to flush in-flight commands
     and release file descriptors cleanly before the process exits.
     """
-    global _redis_client
+    global _redis_client, _redis_client_loop
 
     if _redis_client is not None:
         client = _redis_client
         _redis_client = None
+        _redis_client_loop = None
         logger.info("Closing async Redis client pool")
         try:
             await client.aclose()
             await client.connection_pool.disconnect()
         except Exception:
             pass
+
 
 
 

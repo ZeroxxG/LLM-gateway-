@@ -54,7 +54,9 @@ from gateway.schemas import (
     CandidateScoreOut,
     CircuitStatusOut,
     DailyUsageAggregateOut,
+    LatencyPercentilesOut,
     ModelPricingOut,
+    ObservabilitySummaryOut,
     RateLimitStatusOut,
     RealtimeBudgetStatusOut,
     RequestAuditLogOut,
@@ -62,6 +64,15 @@ from gateway.schemas import (
     RoutingEvaluationOut,
     TenantOut,
     TenantUsageAnalyticsOut,
+)
+from gateway.observability import (
+    CONTENT_TYPE_LATEST,
+    LatencyTracker,
+    gateway_tracer,
+    get_prometheus_metrics_text,
+    record_cache_metric,
+    record_request_metrics,
+    update_circuit_breaker_metric,
 )
 from gateway.security import api_key_auth, api_key_header_auth
 from gateway.tasks import aggregate_daily_usage_task, dispatch_audit_log_async
@@ -312,6 +323,8 @@ async def list_circuit_breakers(request) -> List[CircuitStatusOut]:
     """Inspects Redis-backed circuit breaker state across all providers."""
     providers = ["groq", "openai", "gemini", "mock"]
     circuits = await circuit_breaker.get_all_circuits(providers)
+    for c in circuits:
+        update_circuit_breaker_metric(c["provider"], c["state"])
     return [CircuitStatusOut(**c) for c in circuits]
 
 
@@ -325,6 +338,7 @@ async def list_circuit_breakers(request) -> List[CircuitStatusOut]:
 async def reset_circuit_breaker(request, provider: str) -> dict:
     """Resets circuit breaker failures and state in Redis."""
     await circuit_breaker.reset(provider)
+    update_circuit_breaker_metric(provider, "CLOSED")
     return {"status": "success", "provider": provider.lower(), "state": "CLOSED"}
 
 
@@ -407,6 +421,8 @@ async def chat_completions(
     """
     tenant: Tenant = request.auth
     tenant_id_str = str(tenant.id)
+    trace_id = request.headers.get("x-trace-id") or gateway_tracer.generate_trace_id()
+    start_time = time.time()
 
     # 1. FinOps Pre-flight Real-Time Budget Guard (Sub-millisecond in Redis)
     budget_eval = await FinOpsBudgetManager.evaluate_budget_realtime(tenant)
@@ -440,6 +456,7 @@ async def chat_completions(
                 "X-RateLimit-Limit-RPM": str(rpm_res.limit),
                 "X-RateLimit-Remaining-RPM": "0",
                 "X-RateLimit-Reset": str(rpm_res.reset_seconds),
+                "X-Trace-Id": trace_id,
             },
         )
 
@@ -448,11 +465,27 @@ async def chat_completions(
 
     # 4. Streaming Response Dispatch via Server-Sent Events (SSE)
     if getattr(payload, "stream", False):
+        stream_start_time = time.time()
+
         async def sse_event_stream():
+            stream_chunks = 0
             try:
                 async for chunk in RoutingOrchestrator.stream_and_execute(request=payload, tenant=tenant):
+                    stream_chunks += 1
                     yield f"data: {chunk.model_dump_json()}\n\n"
                 yield "data: [DONE]\n\n"
+                duration = max(0.001, time.time() - stream_start_time)
+                record_request_metrics(
+                    tenant_id=tenant_id_str,
+                    model=payload.model,
+                    provider="streaming",
+                    status_code=200,
+                    routing_strategy=strategy_name,
+                    duration_seconds=duration,
+                    prompt_tokens=stream_chunks * 2,
+                    completion_tokens=stream_chunks * 2,
+                )
+                await LatencyTracker.record_latency(tenant_id_str, duration * 1000.0, model=payload.model)
             except Exception as exc:
                 logger.exception("Error during SSE streaming: %s", exc)
                 err_json = json.dumps({"error": {"message": str(exc), "type": "stream_error"}})
@@ -470,6 +503,7 @@ async def chat_completions(
             "X-Budget-Current-Spend": str(budget_eval.current_spend_usd),
             "X-Budget-Remaining": str(budget_eval.remaining_usd),
             "X-Routing-Strategy": strategy_name,
+            "X-Trace-Id": trace_id,
         }
         if budget_eval.warning_header:
             stream_headers["X-Budget-Warning"] = budget_eval.warning_header
@@ -491,8 +525,23 @@ async def chat_completions(
         cached_response = await PromptCacheManager.get(cache_key)
         if cached_response is not None:
             await PromptCacheManager.record_hit(tenant_id_str)
+            record_cache_metric(tenant_id_str, "hit")
+            hit_duration = max(0.0005, time.time() - start_time)
+            record_request_metrics(
+                tenant_id=tenant_id_str,
+                model=cached_response.model,
+                provider=cached_response.provider,
+                status_code=200,
+                routing_strategy=strategy_name,
+                duration_seconds=hit_duration,
+                prompt_tokens=0,
+                completion_tokens=0,
+                cost_usd=0.0,
+            )
+            await LatencyTracker.record_latency(tenant_id_str, hit_duration * 1000.0, model=cached_response.model)
             response["X-Cache"] = "HIT"
             response["X-Cache-Key"] = cache_key
+            response["X-Trace-Id"] = trace_id
             response["X-RateLimit-Limit-RPM"] = str(rpm_res.limit)
             response["X-RateLimit-Remaining-RPM"] = str(rpm_res.remaining)
             response["X-RateLimit-Reset"] = str(rpm_res.reset_seconds)
@@ -506,14 +555,15 @@ async def chat_completions(
             return cached_response
         else:
             await PromptCacheManager.record_miss(tenant_id_str)
+            record_cache_metric(tenant_id_str, "miss")
             response["X-Cache"] = "MISS"
             response["X-Cache-Key"] = cache_key
     else:
+        record_cache_metric(tenant_id_str, "bypass")
         response["X-Cache"] = "BYPASS"
         response["X-Cache-Key"] = cache_key
 
     # 6. Model Dispatch via Dynamic Routing Orchestrator
-    start_time = time.time()
     try:
         completion_response = await RoutingOrchestrator.route_and_execute(
             request=payload,
@@ -525,11 +575,36 @@ async def chat_completions(
         if not cache_bypass:
             await PromptCacheManager.set(cache_key, completion_response, ttl_seconds=3600)
 
-        # 4. Post-flight TPM Rate Limiting
+        # Post-flight TPM Rate Limiting
         total_tokens = completion_response.usage.total_tokens
         tpm_res = await rate_limiter.check_and_consume_tpm(tenant_id_str, tenant.tpm_limit, total_tokens)
 
-        # 5. Asynchronous Audit Logging via Celery (Non-blocking)
+        # Prometheus Metrics & Observability Telemetry
+        record_request_metrics(
+            tenant_id=tenant_id_str,
+            model=completion_response.model,
+            provider=completion_response.provider,
+            status_code=200,
+            routing_strategy=strategy_name,
+            duration_seconds=latency_ms / 1000.0,
+            prompt_tokens=completion_response.usage.prompt_tokens,
+            completion_tokens=completion_response.usage.completion_tokens,
+            cost_usd=float(completion_response.cost_usd),
+        )
+        await LatencyTracker.record_latency(tenant_id_str, latency_ms, model=completion_response.model)
+        await gateway_tracer.export_trace(
+            trace_id=trace_id,
+            tenant_id=tenant_id_str,
+            model=completion_response.model,
+            provider=completion_response.provider,
+            prompt_tokens=completion_response.usage.prompt_tokens,
+            completion_tokens=completion_response.usage.completion_tokens,
+            latency_ms=latency_ms,
+            cost_usd=float(completion_response.cost_usd),
+            status="success",
+        )
+
+        # Asynchronous Audit Logging via Celery (Non-blocking)
         audit_payload = {
             "tenant_id": tenant_id_str,
             "request_id": completion_response.id,
@@ -546,7 +621,8 @@ async def chat_completions(
         }
         await dispatch_audit_log_async(audit_payload)
 
-        # 6. Inject Standard RFC & FinOps Response Headers
+        # Inject Standard RFC, Trace, & FinOps Response Headers
+        response["X-Trace-Id"] = trace_id
         response["X-RateLimit-Limit-RPM"] = str(rpm_res.limit)
         response["X-RateLimit-Remaining-RPM"] = str(rpm_res.remaining)
         response["X-RateLimit-Limit-TPM"] = str(tpm_res.limit)
@@ -560,7 +636,7 @@ async def chat_completions(
         if budget_eval.warning_header:
             response["X-Budget-Warning"] = budget_eval.warning_header
 
-        # 7. Inject Heuristic Routing Diagnostic Headers
+        # Inject Heuristic Routing Diagnostic Headers
         if completion_response.routing_decision:
             rd = completion_response.routing_decision
             response["X-Routing-Strategy"] = str(rd.get("strategy", strategy_name))
@@ -574,6 +650,14 @@ async def chat_completions(
         return completion_response
 
     except ModelNotSupportedError as exc:
+        record_request_metrics(
+            tenant_id=tenant_id_str,
+            model=payload.model,
+            provider="unknown",
+            status_code=400,
+            routing_strategy=strategy_name,
+            duration_seconds=max(0.001, time.time() - start_time),
+        )
         await dispatch_audit_log_async({
             "tenant_id": tenant_id_str,
             "request_id": f"err_{uuid.uuid4().hex[:12]}",
@@ -585,6 +669,14 @@ async def chat_completions(
         })
         raise HttpError(400, str(exc))
     except ProviderAuthError as exc:
+        record_request_metrics(
+            tenant_id=tenant_id_str,
+            model=payload.model,
+            provider=exc.provider,
+            status_code=502,
+            routing_strategy=strategy_name,
+            duration_seconds=max(0.001, time.time() - start_time),
+        )
         await dispatch_audit_log_async({
             "tenant_id": tenant_id_str,
             "request_id": f"err_{uuid.uuid4().hex[:12]}",
@@ -596,6 +688,14 @@ async def chat_completions(
         })
         raise HttpError(502, f"Upstream provider authentication failed: {exc.message}")
     except ProviderRateLimitError as exc:
+        record_request_metrics(
+            tenant_id=tenant_id_str,
+            model=payload.model,
+            provider=exc.provider,
+            status_code=429,
+            routing_strategy=strategy_name,
+            duration_seconds=max(0.001, time.time() - start_time),
+        )
         await dispatch_audit_log_async({
             "tenant_id": tenant_id_str,
             "request_id": f"err_{uuid.uuid4().hex[:12]}",
@@ -607,6 +707,14 @@ async def chat_completions(
         })
         raise HttpError(429, f"Upstream provider rate limit reached: {exc.message}")
     except ProviderTimeoutError as exc:
+        record_request_metrics(
+            tenant_id=tenant_id_str,
+            model=payload.model,
+            provider=exc.provider,
+            status_code=504,
+            routing_strategy=strategy_name,
+            duration_seconds=max(0.001, time.time() - start_time),
+        )
         await dispatch_audit_log_async({
             "tenant_id": tenant_id_str,
             "request_id": f"err_{uuid.uuid4().hex[:12]}",
@@ -618,6 +726,14 @@ async def chat_completions(
         })
         raise HttpError(504, f"Upstream provider request timed out: {exc.message}")
     except ProviderAPIError as exc:
+        record_request_metrics(
+            tenant_id=tenant_id_str,
+            model=payload.model,
+            provider=exc.provider,
+            status_code=502,
+            routing_strategy=strategy_name,
+            duration_seconds=max(0.001, time.time() - start_time),
+        )
         await dispatch_audit_log_async({
             "tenant_id": tenant_id_str,
             "request_id": f"err_{uuid.uuid4().hex[:12]}",
@@ -629,6 +745,14 @@ async def chat_completions(
         })
         raise HttpError(502, f"Upstream provider returned an error: {exc.message}")
     except Exception as exc:
+        record_request_metrics(
+            tenant_id=tenant_id_str,
+            model=payload.model,
+            provider="unknown",
+            status_code=500,
+            routing_strategy=strategy_name,
+            duration_seconds=max(0.001, time.time() - start_time),
+        )
         logger.exception("Unexpected error during chat completion execution: %s", exc)
         raise HttpError(500, f"Internal gateway error: {str(exc)}")
 
@@ -751,4 +875,88 @@ async def get_task_status(request, task_id: str) -> AsyncTaskStatusOut:
         successful=successful,
         result=result,
     )
+
+
+# ---------------------------------------------------------------------------
+# Observability, Prometheus Metrics & Distributed Tracing
+# ---------------------------------------------------------------------------
+
+
+@api.get(
+    "/metrics",
+    auth=None,
+    summary="Scrape Prometheus Metrics",
+    description=(
+        "Public Prometheus text scrape endpoint. Exposes real-time request counts, "
+        "duration histograms (with p50/p95/p99 quantile buckets), token counters, "
+        "FinOps costs, cache hit/miss counters, and upstream circuit breaker gauges."
+    ),
+    tags=["Observability & Tracing"],
+)
+def prometheus_metrics(request):
+    """Returns real-time gateway metrics in Prometheus exposition format."""
+    return HttpResponse(
+        get_prometheus_metrics_text(),
+        content_type=CONTENT_TYPE_LATEST,
+    )
+
+
+@api.get(
+    "/observability/summary",
+    auth=[api_key_auth, api_key_header_auth],
+    response=ObservabilitySummaryOut,
+    summary="Get Observability & Latency Percentiles Summary",
+    description=(
+        "Returns aggregated request metrics, token breakdown, total FinOps cost, and "
+        "empirical p50, p90, p95, p99 latency quantiles calculated from sliding window observations."
+    ),
+    tags=["Observability & Tracing"],
+)
+async def get_observability_summary(request) -> ObservabilitySummaryOut:
+    """Returns tenant observability summary with empirical latency percentiles."""
+    tenant: Tenant = request.auth
+    tenant_id_str = str(tenant.id)
+
+    # 1. Aggregate metrics from audit logs
+    total_requests = 0
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_cost = Decimal("0.000000")
+
+    async for log in RequestAuditLog.objects.filter(tenant=tenant):
+        total_requests += 1
+        prompt_tokens += log.prompt_tokens
+        completion_tokens += log.completion_tokens
+        total_cost += log.cost_usd
+
+    # 2. Retrieve empirical latency percentiles
+    percentiles_data = await LatencyTracker.get_percentiles(tenant_id_str)
+
+    # Fallback to recent audit logs if sliding window buffer has no samples
+    if percentiles_data["samples_count"] == 0 and total_requests > 0:
+        log_latencies = []
+        async for log in RequestAuditLog.objects.filter(tenant=tenant).order_by("-created_at")[:100]:
+            log_latencies.append(log.latency_ms)
+        if log_latencies:
+            from gateway.observability.latency import calculate_percentile
+
+            sorted_logs = sorted(log_latencies)
+            percentiles_data = {
+                "p50_ms": calculate_percentile(sorted_logs, 50.0),
+                "p90_ms": calculate_percentile(sorted_logs, 90.0),
+                "p95_ms": calculate_percentile(sorted_logs, 95.0),
+                "p99_ms": calculate_percentile(sorted_logs, 99.0),
+                "samples_count": len(sorted_logs),
+            }
+
+    return ObservabilitySummaryOut(
+        tenant_id=tenant.id,
+        total_requests=total_requests,
+        total_tokens=prompt_tokens + completion_tokens,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_cost_usd=total_cost,
+        latency_percentiles=LatencyPercentilesOut(**percentiles_data),
+    )
+
 

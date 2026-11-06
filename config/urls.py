@@ -13,11 +13,22 @@ Phase 1 live routes:
   GET /api/v1/health/live      → Kubernetes liveness probe
   GET /api/v1/health/ready     → Kubernetes readiness probe
 """
+from django.http import HttpResponse
 from django.urls import path
 
 from gateway.api import api
+from gateway.observability import CONTENT_TYPE_LATEST, get_prometheus_metrics_text
+
+
+def prometheus_metrics_view(request):
+    """Serve Prometheus scrape payload at root /metrics."""
+    return HttpResponse(get_prometheus_metrics_text(), content_type=CONTENT_TYPE_LATEST)
+
 
 urlpatterns = [
+    # Root Prometheus scrape endpoint for Kubernetes / Prometheus server
+    path("metrics", prometheus_metrics_view),
+    path("metrics/", prometheus_metrics_view),
     # Mount the entire Ninja API at /api/v1/
     # Django Ninja generates sub-routes internally from registered routers.
     path("api/v1/", api.urls),

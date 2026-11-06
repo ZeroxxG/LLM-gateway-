@@ -220,4 +220,27 @@ class CacheClearOut(BaseModel):
     keys_deleted: int = Field(..., description="Number of cache keys evicted.")
 
 
+class LatencyPercentilesOut(BaseModel):
+    """Empirical latency quantiles in milliseconds."""
+
+    p50_ms: float = Field(..., description="50th percentile (median) latency in milliseconds.")
+    p90_ms: float = Field(..., description="90th percentile latency in milliseconds.")
+    p95_ms: float = Field(..., description="95th percentile latency in milliseconds.")
+    p99_ms: float = Field(..., description="99th percentile latency in milliseconds.")
+    samples_count: int = Field(..., description="Total latency sample observations.")
+
+
+class ObservabilitySummaryOut(BaseModel):
+    """Observability telemetry summary for authenticated tenant."""
+
+    tenant_id: UUID = Field(..., description="Tenant ID.")
+    total_requests: int = Field(..., description="Total requests processed.")
+    total_tokens: int = Field(..., description="Total tokens consumed.")
+    prompt_tokens: int = Field(..., description="Total prompt tokens.")
+    completion_tokens: int = Field(..., description="Total completion tokens.")
+    total_cost_usd: Decimal = Field(..., description="Total FinOps cost in USD.")
+    latency_percentiles: LatencyPercentilesOut = Field(..., description="Empirical latency percentiles.")
+
+
+
 
