@@ -11,10 +11,10 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from gateway.adapters.schemas import ChatCompletionRequest, ChatMessage
-from gateway.benchmarks.dataset import BenchmarkItem, get_benchmark_dataset
+from gateway.adapters.schemas import ChatMessage
+from gateway.benchmarks.dataset import get_benchmark_dataset
 from gateway.benchmarks.evaluator import BenchmarkEvaluator
-from gateway.models import ModelPricing, Tenant
+from gateway.models import Tenant
 from gateway.routing.heuristics import MODEL_CATALOG, HeuristicRouter, ModelProfile
 
 logger = logging.getLogger(__name__)
