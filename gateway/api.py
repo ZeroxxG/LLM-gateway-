@@ -13,6 +13,7 @@ Central Router:
 import asyncio
 from datetime import timedelta
 from decimal import Decimal
+import json
 import logging
 import time
 from typing import Any, List, Optional
@@ -20,7 +21,7 @@ import uuid
 
 from asgiref.sync import sync_to_async
 from celery.result import AsyncResult
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.utils import timezone
 from ninja import NinjaAPI
 from ninja.errors import HttpError
@@ -393,8 +394,44 @@ async def chat_completions(
             },
         )
 
-    # 3. Model Dispatch via Dynamic Routing Orchestrator
+    # 3. Resolve routing strategy
     strategy_name = getattr(payload, "strategy", None) or DynamicRouter.detect_strategy(payload.model).value
+
+    # 4. Streaming Response Dispatch via Server-Sent Events (SSE)
+    if getattr(payload, "stream", False):
+        async def sse_event_stream():
+            try:
+                async for chunk in RoutingOrchestrator.stream_and_execute(request=payload, tenant=tenant):
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as exc:
+                logger.exception("Error during SSE streaming: %s", exc)
+                err_json = json.dumps({"error": {"message": str(exc), "type": "stream_error"}})
+                yield f"data: {err_json}\n\n"
+                yield "data: [DONE]\n\n"
+
+        stream_headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "X-RateLimit-Limit-RPM": str(rpm_res.limit),
+            "X-RateLimit-Remaining-RPM": str(rpm_res.remaining),
+            "X-RateLimit-Reset": str(rpm_res.reset_seconds),
+            "X-Budget-Limit": str(budget_eval.monthly_budget_usd),
+            "X-Budget-Current-Spend": str(budget_eval.current_spend_usd),
+            "X-Budget-Remaining": str(budget_eval.remaining_usd),
+            "X-Routing-Strategy": strategy_name,
+        }
+        if budget_eval.warning_header:
+            stream_headers["X-Budget-Warning"] = budget_eval.warning_header
+
+        return StreamingHttpResponse(
+            sse_event_stream(),
+            content_type="text/event-stream",
+            headers=stream_headers,
+        )
+
+    # 4. Model Dispatch via Dynamic Routing Orchestrator
     start_time = time.time()
     try:
         completion_response = await RoutingOrchestrator.route_and_execute(

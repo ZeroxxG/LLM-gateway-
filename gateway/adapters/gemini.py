@@ -7,9 +7,10 @@ Executes asynchronous completions against Google's Gemini v1beta REST API.
 Translates between OpenAI-standard message structures and Gemini's content/parts schema.
 Endpoint: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
 """
+import json
 import logging
 import time
-from typing import Any, Dict, List
+from typing import Any, AsyncGenerator, Dict, List
 import httpx
 from django.conf import settings
 
@@ -22,6 +23,9 @@ from gateway.adapters.exceptions import (
 )
 from gateway.adapters.schemas import (
     ChatCompletionChoice,
+    ChatCompletionChunk,
+    ChatCompletionChunkChoice,
+    ChatCompletionChunkDelta,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessage,
@@ -197,3 +201,78 @@ class GeminiAdapter(BaseProviderAdapter):
                 f"Network transport error calling Gemini: {exc}",
                 provider=self.provider_name,
             ) from exc
+
+    async def stream_complete(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[ChatCompletionChunk, None]:
+        """Streams chat completion tokens from Gemini via SSE."""
+        if not self.api_key:
+            raise ProviderAuthError("Gemini API key is not configured.", provider=self.provider_name, status_code=401)
+
+        upstream_model = self.resolve_model(request.model)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{upstream_model}:streamGenerateContent?alt=sse"
+
+        system_instruction, contents = self._convert_messages(request.messages)
+        payload: Dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": request.temperature,
+                "maxOutputTokens": request.max_tokens,
+                "topP": request.top_p,
+            },
+        }
+        if system_instruction:
+            payload["systemInstruction"] = system_instruction
+
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key,
+        }
+        client = await get_shared_http_client()
+
+        try:
+            async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                if resp.status_code >= 400:
+                    raw_err = await resp.aread()
+                    raise ProviderAPIError(
+                        f"Gemini stream rejected ({resp.status_code}): {raw_err.decode('utf-8', errors='replace')}",
+                        provider=self.provider_name,
+                        status_code=resp.status_code,
+                    )
+
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    if line.startswith("data: "):
+                        raw_data = line[len("data: "):].strip()
+                        try:
+                            item = json.loads(raw_data)
+                            candidates = item.get("candidates", [])
+                            if not candidates:
+                                continue
+                            c = candidates[0]
+                            parts = c.get("content", {}).get("parts", [])
+                            text_piece = "".join(p.get("text", "") for p in parts)
+                            finish_reason = c.get("finishReason")
+                            if finish_reason:
+                                finish_reason = finish_reason.lower()
+
+                            yield ChatCompletionChunk(
+                                id=f"chatcmpl-gemini-{int(time.time())}",
+                                model=request.model,
+                                provider=self.provider_name,
+                                choices=[
+                                    ChatCompletionChunkChoice(
+                                        index=0,
+                                        delta=ChatCompletionChunkDelta(content=text_piece),
+                                        finish_reason=finish_reason,
+                                    )
+                                ],
+                            )
+                        except json.JSONDecodeError:
+                            continue
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeoutError(f"Gemini stream timed out: {exc}", provider=self.provider_name) from exc
+        except httpx.RequestError as exc:
+            raise ProviderAPIError(f"Network error on Gemini stream: {exc}", provider=self.provider_name) from exc
+

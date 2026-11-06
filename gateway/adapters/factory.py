@@ -9,7 +9,7 @@ token expenses against the tenant's budget.
 """
 import logging
 from decimal import Decimal
-from typing import Dict, Optional
+from typing import AsyncGenerator, Dict, Optional
 
 from django.db.models import F
 
@@ -19,7 +19,7 @@ from gateway.adapters.gemini import GeminiAdapter
 from gateway.adapters.groq import GroqAdapter
 from gateway.adapters.mock import MockAdapter
 from gateway.adapters.openai import OpenAIAdapter
-from gateway.adapters.schemas import ChatCompletionRequest, ChatCompletionResponse
+from gateway.adapters.schemas import ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse
 from gateway.models import ModelPricing, Tenant
 
 logger = logging.getLogger(__name__)
@@ -108,3 +108,15 @@ class ProviderFactory:
                 await FinOpsBudgetManager.record_spend_atomic(tenant.id, cost, tenant.monthly_budget_usd)
 
         return response
+
+    @classmethod
+    async def stream_completion(
+        cls,
+        request: ChatCompletionRequest,
+    ) -> AsyncGenerator[ChatCompletionChunk, None]:
+        """Resolves provider adapter and returns an asynchronous generator of chunks."""
+        provider_name, _ = await cls.resolve_provider(request.model)
+        adapter = cls.get_adapter(provider_name)
+        async for chunk in adapter.stream_complete(request):
+            yield chunk
+

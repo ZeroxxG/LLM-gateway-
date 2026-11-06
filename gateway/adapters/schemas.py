@@ -127,3 +127,36 @@ class ChatCompletionResponse(BaseModel):
         default=None,
         description="Diagnostic metadata from the heuristic decision engine.",
     )
+
+
+class ChatCompletionChunkDelta(BaseModel):
+    """Incremental content update in a streaming chunk."""
+
+    role: Optional[str] = Field(None, description="The author role if introduced in this delta.")
+    content: Optional[str] = Field(None, description="The incremental token text generated.")
+
+
+class ChatCompletionChunkChoice(BaseModel):
+    """Candidate choice for a streaming chunk."""
+
+    index: int = Field(0, description="Choice index.")
+    delta: ChatCompletionChunkDelta = Field(..., description="Partial message delta.")
+    finish_reason: Optional[str] = Field(None, description="Reason stream stopped, e.g. 'stop'.")
+
+
+class ChatCompletionChunk(BaseModel):
+    """Standard OpenAI-compatible streaming response chunk."""
+
+    id: str = Field(
+        default_factory=lambda: f"chatcmpl-{uuid4().hex[:12]}",
+        description="Unique completion identifier.",
+    )
+    object: str = Field("chat.completion.chunk", description="Object type indicator.")
+    created: int = Field(
+        default_factory=lambda: int(time.time()),
+        description="Timestamp chunk was emitted.",
+    )
+    model: str = Field(..., description="Model generating this stream.")
+    provider: str = Field(..., description="Provider executing this stream.")
+    choices: List[ChatCompletionChunkChoice] = Field(..., description="Chunk choices.")
+

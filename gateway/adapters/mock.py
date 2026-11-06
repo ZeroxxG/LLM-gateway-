@@ -10,10 +10,15 @@ import asyncio
 import logging
 import time
 from decimal import Decimal
+from typing import AsyncGenerator
+from uuid import uuid4
 
 from gateway.adapters.base import BaseProviderAdapter
 from gateway.adapters.schemas import (
     ChatCompletionChoice,
+    ChatCompletionChunk,
+    ChatCompletionChunkChoice,
+    ChatCompletionChunkDelta,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessage,
@@ -28,8 +33,9 @@ class MockAdapter(BaseProviderAdapter):
 
     provider_name: str = "mock"
 
-    def __init__(self, simulated_latency_ms: float = 15.0):
+    def __init__(self, simulated_latency_ms: float = 15.0, fail_on_stream: bool = False):
         self.simulated_latency_ms = simulated_latency_ms
+        self.fail_on_stream = fail_on_stream
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         start_time = time.perf_counter()
@@ -71,3 +77,70 @@ class MockAdapter(BaseProviderAdapter):
             ),
             latency_ms=round(latency_ms, 2),
         )
+
+    async def stream_complete(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[ChatCompletionChunk, None]:
+        """Streams mock response chunks word-by-word."""
+        if self.fail_on_stream:
+            from gateway.adapters.exceptions import ProviderAPIError
+            raise ProviderAPIError("Simulated mock streaming failure", provider=self.provider_name, status_code=500)
+
+        chunk_id = f"chatcmpl-mock-{uuid4().hex[:10]}"
+        created = int(time.time())
+
+        # Initial chunk announcing assistant role
+        yield ChatCompletionChunk(
+            id=chunk_id,
+            created=created,
+            model=request.model,
+            provider=self.provider_name,
+            choices=[
+                ChatCompletionChunkChoice(
+                    index=0,
+                    delta=ChatCompletionChunkDelta(role="assistant", content=""),
+                    finish_reason=None,
+                )
+            ],
+        )
+
+        last_user_msg = next(
+            (m.content for m in reversed(request.messages) if m.role == "user"),
+            "Hello",
+        )
+        response_text = f"[Mock Stream] Streamed response for: '{last_user_msg}'"
+        words = response_text.split(" ")
+
+        for i, word in enumerate(words):
+            if self.simulated_latency_ms > 0:
+                await asyncio.sleep(0.005)
+            prefix = " " if i > 0 else ""
+            yield ChatCompletionChunk(
+                id=chunk_id,
+                created=created,
+                model=request.model,
+                provider=self.provider_name,
+                choices=[
+                    ChatCompletionChunkChoice(
+                        index=0,
+                        delta=ChatCompletionChunkDelta(content=prefix + word),
+                        finish_reason=None,
+                    )
+                ],
+            )
+
+        # Final chunk indicating stop
+        yield ChatCompletionChunk(
+            id=chunk_id,
+            created=created,
+            model=request.model,
+            provider=self.provider_name,
+            choices=[
+                ChatCompletionChunkChoice(
+                    index=0,
+                    delta=ChatCompletionChunkDelta(content=""),
+                    finish_reason="stop",
+                )
+            ],
+        )
+

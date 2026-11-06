@@ -11,11 +11,11 @@ Ensures:
 """
 from abc import ABC, abstractmethod
 import logging
-from typing import Optional
+from typing import AsyncGenerator, Optional
 import httpx
 from django.conf import settings
 
-from gateway.adapters.schemas import ChatCompletionRequest, ChatCompletionResponse
+from gateway.adapters.schemas import ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse
 
 logger = logging.getLogger(__name__)
 
@@ -76,3 +76,19 @@ class BaseProviderAdapter(ABC):
             ProviderException: Normalized gateway exception for errors.
         """
         pass
+
+    @abstractmethod
+    async def stream_complete(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[ChatCompletionChunk, None]:
+        """
+        Streams chat completion chunks asynchronously from upstream provider.
+
+        Yields:
+            ChatCompletionChunk instances.
+
+        Raises:
+            ProviderException: Normalized gateway exception on failure.
+        """
+        pass
+
