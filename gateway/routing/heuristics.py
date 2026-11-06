@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 import logging
+import math
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -395,21 +396,19 @@ class HeuristicRouter:
             cap_affinity = profile.task_affinity.get(task_type, 0.75)
             cap_score = cap_affinity * 100.0
 
-            # 2. Latency Score (0-100): Lower latency gives higher score
-            # 15ms -> ~100, 200ms -> ~85, 500ms -> ~70, 1500ms -> ~40
-            lat_score = max(10.0, 100.0 - (profile.typical_latency_ms / 20.0))
+            # 2. Latency Score (0-100): Lower latency gives higher score (log-normalized)
+            lat_score = max(20.0, 100.0 - (math.log10(max(1.0, profile.typical_latency_ms)) * 22.0))
 
-            # 3. Cost Score (0-100): Lower cost gives higher score
-            # $0.05/M -> ~95, $0.15/M -> ~85, $3.00/M -> ~30
+            # 3. Cost Score (0-100): Lower cost gives higher score (log-normalized)
             cost_factor = float(profile.input_cost_per_million + profile.output_cost_per_million)
-            cost_score = max(10.0, 100.0 - (cost_factor * 15.0))
+            cost_score = max(20.0, 100.0 - (math.log10(max(0.01, cost_factor) + 1.0) * 45.0))
 
             # Dynamic Weights based on task type:
-            # - Coding/Reasoning: Higher weight on capability (50% capability, 25% latency, 25% cost)
+            # - Coding/Reasoning: Higher weight on capability (75% capability, 15% latency, 10% cost)
             # - Chat: Higher weight on latency (35% capability, 45% latency, 20% cost)
             # - General: Balanced (40% capability, 30% latency, 30% cost)
             if task_type in (TaskType.CODING, TaskType.REASONING):
-                w_cap, w_lat, w_cost = 0.50, 0.25, 0.25
+                w_cap, w_lat, w_cost = 0.75, 0.15, 0.10
             elif task_type == TaskType.CHAT:
                 w_cap, w_lat, w_cost = 0.35, 0.45, 0.20
             else:

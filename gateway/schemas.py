@@ -242,5 +242,57 @@ class ObservabilitySummaryOut(BaseModel):
     latency_percentiles: LatencyPercentilesOut = Field(..., description="Empirical latency percentiles.")
 
 
+class BenchmarkRunIn(BaseModel):
+    """Execution request options for benchmark suite."""
+
+    sample_size: int = Field(40, ge=1, le=40, description="Number of benchmark test items to run (1 to 40).")
+    categories: Optional[List[str]] = Field(None, description="Optional task categories filter (chat, extraction, summarization, coding, reasoning).")
+    mode: str = Field("simulated", description="Execution mode: 'simulated' or 'live'.")
+    premium_model: str = Field("anthropic/claude-3-5-sonnet", description="Canonical model ID for baseline comparison.")
+
+
+class BenchmarkItemResultOut(BaseModel):
+    """Individual item benchmark evaluation record."""
+
+    item_id: str = Field(..., description="Unique benchmark item ID.")
+    category: str = Field(..., description="Task category classification.")
+    complexity: str = Field(..., description="Complexity classification: low, medium, high.")
+    prompt_preview: str = Field(..., description="Truncated prompt preview.")
+    routed_model: str = Field(..., description="Model selected by Routed Gateway.")
+    premium_model: str = Field(..., description="Baseline premium model.")
+    cost_routed_usd: Decimal = Field(..., description="FinOps spend under Routed Gateway.")
+    cost_premium_usd: Decimal = Field(..., description="FinOps spend under All-Premium baseline.")
+    accurate_routed: bool = Field(..., description="Whether Routed Gateway answered accurately.")
+    accurate_premium: bool = Field(..., description="Whether All-Premium baseline answered accurately.")
+
+
+class BenchmarkStrategyResultOut(BaseModel):
+    """Aggregated performance metrics for a routing strategy."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    strategy_name: str = Field(..., description="Routing strategy name.")
+    total_requests: int = Field(..., description="Total benchmark requests processed.")
+    total_cost_usd: Decimal = Field(..., description="Total FinOps token cost in USD.")
+    avg_latency_ms: float = Field(..., description="Average response latency in milliseconds.")
+    accuracy_rate: float = Field(..., description="Accuracy percentage (0.0 to 100.0).")
+    model_distribution: dict[str, int] = Field(..., description="Distribution of models dispatched.")
+
+
+class BenchmarkComparisonOut(BaseModel):
+    """Comprehensive comparative evaluation of All-Premium vs. Routed Gateway."""
+
+    total_items: int = Field(..., description="Total benchmark prompts evaluated.")
+    all_premium: BenchmarkStrategyResultOut = Field(..., description="All-Premium baseline performance metrics.")
+    routed_gateway: BenchmarkStrategyResultOut = Field(..., description="Routed Gateway performance metrics.")
+    spend_cut_percentage: float = Field(..., description="Percentage of token spend reduced by routing.")
+    cost_savings_multiplier: float = Field(..., description="Cost efficiency multiplier (e.g. 3.7x).")
+    accuracy_delta: float = Field(..., description="Accuracy variance between Routed Gateway and All-Premium.")
+    latency_reduction_percentage: float = Field(..., description="Percentage reduction in average response latency.")
+    summary: str = Field(..., description="High-level executive evaluation summary.")
+    sample_items: List[BenchmarkItemResultOut] = Field(..., description="Sample of item-level evaluations.")
+
+
+
 
 

@@ -34,6 +34,7 @@ from gateway.adapters.exceptions import (
     ProviderTimeoutError,
 )
 from gateway.adapters.schemas import ChatCompletionRequest, ChatCompletionResponse
+from gateway.benchmarks import BenchmarkRunner
 from gateway.caching import PromptCacheManager
 from gateway.health.router import router as health_router
 from gateway.models import DailyUsageAggregate, ModelPricing, RequestAuditLog, Tenant
@@ -47,6 +48,8 @@ from gateway.schemas import (
     AsyncTaskStatusOut,
     AsyncTaskTriggerOut,
     AuthVerifyOut,
+    BenchmarkComparisonOut,
+    BenchmarkRunIn,
     BudgetSyncOut,
     BudgetTopUpIn,
     CacheClearOut,
@@ -958,5 +961,37 @@ async def get_observability_summary(request) -> ObservabilitySummaryOut:
         total_cost_usd=total_cost,
         latency_percentiles=LatencyPercentilesOut(**percentiles_data),
     )
+
+
+# ---------------------------------------------------------------------------
+# Benchmark Harness & Baseline Evaluation (Phase 12)
+# ---------------------------------------------------------------------------
+
+
+@api.post(
+    "/benchmarks/run",
+    auth=[api_key_auth, api_key_header_auth],
+    response=BenchmarkComparisonOut,
+    summary="Execute Baseline vs. Routed Gateway Benchmark",
+    description=(
+        "Executes a curated 40-item benchmark suite comparing All-Premium baseline "
+        "against Intelligent Routed Gateway. Measures total spend reduction, "
+        "accuracy retention, and latency improvements across diverse task complexities."
+    ),
+    tags=["Benchmark Harness & Evaluation"],
+)
+async def run_benchmark(request, payload: Optional[BenchmarkRunIn] = None) -> BenchmarkComparisonOut:
+    """Executes the benchmark harness comparing All-Premium vs. Routed Gateway."""
+    tenant: Tenant = request.auth
+    opts = payload or BenchmarkRunIn()
+    result = await BenchmarkRunner.run_benchmark(
+        sample_size=opts.sample_size,
+        categories=opts.categories,
+        tenant=tenant,
+        mode=opts.mode,
+        premium_model=opts.premium_model,
+    )
+    return BenchmarkComparisonOut(**result)
+
 
 
