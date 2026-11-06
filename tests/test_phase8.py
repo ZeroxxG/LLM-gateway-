@@ -44,6 +44,8 @@ async def test_full_phase8_suite():
     await ensure_seed_data()
     # Warm up async Redis pool
     await get_redis_client()
+    for p in ["groq", "gemini", "google", "openai", "mock"]:
+        await circuit_breaker.reset(p)
     # Warm up router
     await HeuristicRouter.evaluate_routing(messages=[ChatMessage(role="user", content="warmup")])
 

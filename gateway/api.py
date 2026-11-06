@@ -34,6 +34,7 @@ from gateway.adapters.exceptions import (
     ProviderTimeoutError,
 )
 from gateway.adapters.schemas import ChatCompletionRequest, ChatCompletionResponse
+from gateway.caching import PromptCacheManager
 from gateway.health.router import router as health_router
 from gateway.models import DailyUsageAggregate, ModelPricing, RequestAuditLog, Tenant
 from gateway.ratelimit.budget import FinOpsBudgetManager
@@ -48,6 +49,8 @@ from gateway.schemas import (
     AuthVerifyOut,
     BudgetSyncOut,
     BudgetTopUpIn,
+    CacheClearOut,
+    CacheStatsOut,
     CandidateScoreOut,
     CircuitStatusOut,
     DailyUsageAggregateOut,
@@ -215,6 +218,52 @@ async def get_ratelimit_status(request) -> RateLimitStatusOut:
         tpm_limit=tenant.tpm_limit,
         tpm_remaining=tenant.tpm_limit,  # Baseline allocation
         window_reset_seconds=rpm_res.reset_seconds,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prompt Response Caching & Acceleration
+# ---------------------------------------------------------------------------
+
+
+@api.post(
+    "/cache/clear",
+    auth=[api_key_auth, api_key_header_auth],
+    response=CacheClearOut,
+    summary="Clear Tenant Prompt Response Cache",
+    description="Flushes all cached prompt responses in Redis for the authenticated tenant.",
+    tags=["Caching & Acceleration"],
+)
+async def clear_cache(request) -> CacheClearOut:
+    """Invalidates all cached completion entries for the calling tenant."""
+    tenant: Tenant = request.auth
+    deleted = await PromptCacheManager.clear_tenant_cache(str(tenant.id))
+    return CacheClearOut(
+        tenant_id=tenant.id,
+        status="cleared",
+        keys_deleted=deleted,
+    )
+
+
+@api.get(
+    "/cache/stats",
+    auth=[api_key_auth, api_key_header_auth],
+    response=CacheStatsOut,
+    summary="Get Cache Performance Telemetry",
+    description="Returns real-time cache hits, misses, hit ratio, and active cached keys in Redis for the authenticated tenant.",
+    tags=["Caching & Acceleration"],
+)
+async def get_cache_stats(request) -> CacheStatsOut:
+    """Returns hit/miss metrics and active cache key count from Redis."""
+    tenant: Tenant = request.auth
+    stats = await PromptCacheManager.get_stats(str(tenant.id))
+    return CacheStatsOut(
+        tenant_id=tenant.id,
+        hits=stats["hits"],
+        misses=stats["misses"],
+        total_requests=stats["total_requests"],
+        hit_ratio=stats["hit_ratio"],
+        cached_keys=stats["cached_keys"],
     )
 
 
@@ -431,7 +480,39 @@ async def chat_completions(
             headers=stream_headers,
         )
 
-    # 4. Model Dispatch via Dynamic Routing Orchestrator
+    # 5. Check Prompt Response Cache in Redis
+    cache_bypass = (
+        request.headers.get("cache-control", "").lower() == "no-cache"
+        or request.headers.get("x-cache-bypass", "").lower() == "true"
+    )
+    cache_key = PromptCacheManager.compute_cache_key(tenant_id_str, payload)
+
+    if not cache_bypass:
+        cached_response = await PromptCacheManager.get(cache_key)
+        if cached_response is not None:
+            await PromptCacheManager.record_hit(tenant_id_str)
+            response["X-Cache"] = "HIT"
+            response["X-Cache-Key"] = cache_key
+            response["X-RateLimit-Limit-RPM"] = str(rpm_res.limit)
+            response["X-RateLimit-Remaining-RPM"] = str(rpm_res.remaining)
+            response["X-RateLimit-Reset"] = str(rpm_res.reset_seconds)
+            response["X-Budget-Limit"] = str(budget_eval.monthly_budget_usd)
+            response["X-Budget-Current-Spend"] = str(budget_eval.current_spend_usd)
+            response["X-Budget-Remaining"] = str(budget_eval.remaining_usd)
+            response["X-Routing-Strategy"] = strategy_name
+            response["X-Routing-Selected-Model"] = cached_response.model
+            if budget_eval.warning_header:
+                response["X-Budget-Warning"] = budget_eval.warning_header
+            return cached_response
+        else:
+            await PromptCacheManager.record_miss(tenant_id_str)
+            response["X-Cache"] = "MISS"
+            response["X-Cache-Key"] = cache_key
+    else:
+        response["X-Cache"] = "BYPASS"
+        response["X-Cache-Key"] = cache_key
+
+    # 6. Model Dispatch via Dynamic Routing Orchestrator
     start_time = time.time()
     try:
         completion_response = await RoutingOrchestrator.route_and_execute(
@@ -439,6 +520,10 @@ async def chat_completions(
             tenant=tenant,
         )
         latency_ms = (time.time() - start_time) * 1000.0
+
+        # Store in Redis cache asynchronously if caching was enabled
+        if not cache_bypass:
+            await PromptCacheManager.set(cache_key, completion_response, ttl_seconds=3600)
 
         # 4. Post-flight TPM Rate Limiting
         total_tokens = completion_response.usage.total_tokens

@@ -201,3 +201,23 @@ class RoutingEvaluationOut(BaseModel):
     strategy_used: str = Field("heuristic", description="Routing policy used.")
 
 
+class CacheStatsOut(BaseModel):
+    """Cache telemetry and hit-ratio metrics for a tenant."""
+
+    tenant_id: UUID = Field(..., description="Tenant ID.")
+    hits: int = Field(..., description="Total cache hits.")
+    misses: int = Field(..., description="Total cache misses.")
+    total_requests: int = Field(..., description="Total requests processed through cache.")
+    hit_ratio: float = Field(..., description="Cache hit ratio (0.0 to 1.0).")
+    cached_keys: int = Field(..., description="Number of active cached entries.")
+
+
+class CacheClearOut(BaseModel):
+    """Result of cache invalidation operation."""
+
+    tenant_id: UUID = Field(..., description="Tenant ID.")
+    status: str = Field("cleared", description="Status of cache invalidation.")
+    keys_deleted: int = Field(..., description="Number of cache keys evicted.")
+
+
+

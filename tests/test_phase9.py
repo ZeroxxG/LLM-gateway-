@@ -46,6 +46,8 @@ async def test_full_phase9_suite():
     tenant = await ensure_seed_data()
     await get_redis_client()
     assert tenant is not None, "Tenant must exist from seed data"
+    for p in ["groq", "gemini", "google", "openai", "mock"]:
+        await circuit_breaker.reset(p)
 
     # -------------------------------------------------------------------------
     # 1. Direct Adapter Streaming Verification
@@ -172,6 +174,9 @@ async def test_full_phase9_suite():
         print(f"[PASS] Streaming fallback succeeded seamlessly, yielded {len(stream_chunks)} chunks from fallback candidate.")
 
     # Cleanup connections
+    for p in ["groq", "gemini", "google", "openai", "mock"]:
+        await circuit_breaker.reset(p)
+    ProviderFactory.register_adapter("mock", MockAdapter())
     await close_shared_http_client()
     await close_redis_client()
 

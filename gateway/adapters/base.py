@@ -15,7 +15,13 @@ from typing import AsyncGenerator, Optional
 import httpx
 from django.conf import settings
 
-from gateway.adapters.schemas import ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse
+from gateway.adapters.schemas import (
+    ChatCompletionChunk,
+    ChatCompletionChunkChoice,
+    ChatCompletionChunkDelta,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,18 +83,30 @@ class BaseProviderAdapter(ABC):
         """
         pass
 
-    @abstractmethod
     async def stream_complete(
         self, request: ChatCompletionRequest
     ) -> AsyncGenerator[ChatCompletionChunk, None]:
         """
         Streams chat completion chunks asynchronously from upstream provider.
-
-        Yields:
-            ChatCompletionChunk instances.
-
-        Raises:
-            ProviderException: Normalized gateway exception on failure.
+        Default implementation delegates to complete() and yields choices as chunks.
         """
-        pass
+        response = await self.complete(request)
+        for choice in response.choices:
+            yield ChatCompletionChunk(
+                id=response.id,
+                created=response.created,
+                model=response.model,
+                provider=self.provider_name,
+                choices=[
+                    ChatCompletionChunkChoice(
+                        index=choice.index,
+                        delta=ChatCompletionChunkDelta(
+                            role=choice.message.role,
+                            content=choice.message.content,
+                        ),
+                        finish_reason=choice.finish_reason,
+                    )
+                ],
+            )
+
 
