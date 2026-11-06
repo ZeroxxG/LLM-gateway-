@@ -371,3 +371,32 @@ def get_benchmark_dataset(sample_size: int = 40, categories: List[str] = None) -
         cat_set = {c.lower() for c in categories}
         items = [item for item in items if item.category.lower() in cat_set]
     return items[:sample_size]
+
+
+def get_items_by_complexity(complexity: str, sample_size: int = None) -> List[BenchmarkItem]:
+    """Filter benchmark items by complexity level (low, medium, high)."""
+    target = complexity.lower()
+    filtered = [item for item in BENCHMARK_DATASET if item.complexity.lower() == target]
+    if sample_size is not None:
+        return filtered[:sample_size]
+    return filtered
+
+
+def get_dataset_summary() -> dict:
+    """Return descriptive distribution summary of the benchmark dataset."""
+    cat_counts = {}
+    comp_counts = {}
+    tier_counts = {}
+
+    for item in BENCHMARK_DATASET:
+        cat_counts[item.category] = cat_counts.get(item.category, 0) + 1
+        comp_counts[item.complexity] = comp_counts.get(item.complexity, 0) + 1
+        tier_counts[item.required_tier] = tier_counts.get(item.required_tier, 0) + 1
+
+    return {
+        "total_items": len(BENCHMARK_DATASET),
+        "by_category": cat_counts,
+        "by_complexity": comp_counts,
+        "by_required_tier": tier_counts,
+    }
+
