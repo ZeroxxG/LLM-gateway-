@@ -99,7 +99,7 @@ services:
         condition: service_healthy
 
   # ---------------------------------------------------------------------------
-  # Celery Worker  (stub — activated fully in Phase 6)
+  # Celery Worker (Asynchronous audit logging & usage rollups)
   # ---------------------------------------------------------------------------
   worker:
     build:
@@ -108,6 +108,30 @@ services:
     container_name: llmgw_worker
     restart: unless-stopped
     command: celery -A config.celery_app worker --loglevel=info --concurrency=4
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL:              postgres://gateway_user:gateway_pass@db:5432/llm_gateway
+      REDIS_URL:                 redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE:   config.settings.development
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Celery Beat Scheduler (Periodic budget reconciliation & audit cleanup)
+  # ---------------------------------------------------------------------------
+  beat:
+    build:
+      context: .
+      target: builder
+    container_name: llmgw_beat
+    restart: unless-stopped
+    command: celery -A config.celery_app beat --loglevel=info
     volumes:
       - .:/app
     env_file:
