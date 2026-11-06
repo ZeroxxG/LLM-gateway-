@@ -37,6 +37,7 @@ class LatencyTracker:
     """Records latencies in Redis and calculates empirical quantiles."""
 
     MAX_SAMPLES = 1000
+    BUFFER_TTL_SECONDS = 604800  # 7-day retention for sliding window history
 
     @classmethod
     async def record_latency(cls, tenant_id: str, latency_ms: float, model: str = "") -> None:
@@ -48,7 +49,7 @@ class LatencyTracker:
         _local_latency_buffer[tid].append(val)
         _local_latency_buffer["global"].append(val)
 
-        # Store in Redis list with LTRIM
+        # Store in Redis list with LTRIM and refresh TTL
         try:
             client = await get_redis_client()
             tenant_key = f"llm:latency:{tid}"
@@ -56,8 +57,10 @@ class LatencyTracker:
             pipe = client.pipeline()
             pipe.rpush(tenant_key, str(val))
             pipe.ltrim(tenant_key, -cls.MAX_SAMPLES, -1)
+            pipe.expire(tenant_key, cls.BUFFER_TTL_SECONDS)
             pipe.rpush(global_key, str(val))
             pipe.ltrim(global_key, -cls.MAX_SAMPLES, -1)
+            pipe.expire(global_key, cls.BUFFER_TTL_SECONDS)
             await pipe.execute()
         except Exception as exc:
             logger.warning("Failed to record latency sample in Redis: %s", exc)
