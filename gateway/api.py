@@ -67,7 +67,10 @@ from gateway.schemas import (
     RoutingEvaluationOut,
     TenantOut,
     TenantUsageAnalyticsOut,
+    SecurityScanIn,
+    SecurityScanOut,
 )
+from gateway.guardrails import GuardrailViolationException, SecurityGuardrailManager
 from gateway.observability import (
     CONTENT_TYPE_LATEST,
     LatencyTracker,
@@ -97,7 +100,13 @@ api = NinjaAPI(
         "- **Phase 4**: Dynamic Model Routing, Intelligent Fallbacks & Distributed Redis Circuit Breakers\n"
         "- **Phase 5**: Distributed Rate Limiting (RPM/TPM) & FinOps Soft/Hard Budget Controls\n"
         "- **Phase 6**: Celery Background Workers, Asynchronous Usage Aggregation & Analytics\n"
-        "- **Phase 7**: Real-Time Budget Enforcement – Atomic Redis spend tracking (INCRBYFLOAT) & hard-stop 402 rejection"
+        "- **Phase 7**: Real-Time Budget Enforcement – Atomic Redis spend tracking (INCRBYFLOAT) & hard-stop 402 rejection\n"
+        "- **Phase 8**: Sub-2ms Heuristic Multi-Factor Routing Engine\n"
+        "- **Phase 9**: Real-Time Token Streaming via Server-Sent Events (SSE)\n"
+        "- **Phase 10**: Deterministic SHA-256 Prompt Response Caching with Invalidation Controls\n"
+        "- **Phase 11**: Observability & Tracing – Prometheus collector registry and latency quantiles\n"
+        "- **Phase 12**: Benchmark Harness & Baseline Evaluation (40-item comparative dataset)\n"
+        "- **Phase 13**: Security, Guardrails & Content Moderation – Sub-2ms PII masking, injection defense & moderation"
     ),
     docs_url="/docs",
     openapi_url="/openapi.json",
@@ -463,10 +472,46 @@ async def chat_completions(
             },
         )
 
-    # 3. Resolve routing strategy
+    # 3. Pre-flight Security Guardrails Scan (PII Masking, Prompt Injection, Content Moderation)
+    try:
+        guardrail_result = SecurityGuardrailManager.inspect_request(
+            payload=payload,
+            mask_pii=True,
+            check_injection=True,
+            check_moderation=True,
+            block_on_violation=True,
+        )
+    except GuardrailViolationException as exc:
+        logger.warning(
+            "Tenant '%s' request blocked by security guardrails: %s (risk: %s)",
+            tenant.name,
+            exc.message,
+            exc.injection_risk,
+        )
+        return JsonResponse(
+            {
+                "error": {
+                    "type": "guardrail_violation",
+                    "message": exc.message,
+                    "violations": exc.violations,
+                    "injection_risk": exc.injection_risk,
+                }
+            },
+            status=exc.status_code,
+            headers={
+                "X-Security-Action": exc.action,
+                "X-Security-Injection-Risk": exc.injection_risk,
+                "X-Trace-Id": trace_id,
+            },
+        )
+
+    security_action = guardrail_result.action
+    security_pii = ",".join(guardrail_result.pii_detected_types)
+
+    # 4. Resolve routing strategy
     strategy_name = getattr(payload, "strategy", None) or DynamicRouter.detect_strategy(payload.model).value
 
-    # 4. Streaming Response Dispatch via Server-Sent Events (SSE)
+    # 5. Streaming Response Dispatch via Server-Sent Events (SSE)
     if getattr(payload, "stream", False):
         stream_start_time = time.time()
 
@@ -507,7 +552,10 @@ async def chat_completions(
             "X-Budget-Remaining": str(budget_eval.remaining_usd),
             "X-Routing-Strategy": strategy_name,
             "X-Trace-Id": trace_id,
+            "X-Security-Action": security_action,
         }
+        if security_pii:
+            stream_headers["X-Security-PII-Detected"] = security_pii
         if budget_eval.warning_header:
             stream_headers["X-Budget-Warning"] = budget_eval.warning_header
 
@@ -553,6 +601,9 @@ async def chat_completions(
             response["X-Budget-Remaining"] = str(budget_eval.remaining_usd)
             response["X-Routing-Strategy"] = strategy_name
             response["X-Routing-Selected-Model"] = cached_response.model
+            response["X-Security-Action"] = security_action
+            if security_pii:
+                response["X-Security-PII-Detected"] = security_pii
             if budget_eval.warning_header:
                 response["X-Budget-Warning"] = budget_eval.warning_header
             return cached_response
@@ -638,6 +689,11 @@ async def chat_completions(
 
         if budget_eval.warning_header:
             response["X-Budget-Warning"] = budget_eval.warning_header
+
+        # Inject Security Guardrail Response Headers
+        response["X-Security-Action"] = security_action
+        if security_pii:
+            response["X-Security-PII-Detected"] = security_pii
 
         # Inject Heuristic Routing Diagnostic Headers
         if completion_response.routing_decision:
@@ -992,6 +1048,44 @@ async def run_benchmark(request, payload: Optional[BenchmarkRunIn] = None) -> Be
         premium_model=opts.premium_model,
     )
     return BenchmarkComparisonOut(**result)
+
+
+# ---------------------------------------------------------------------------
+# Security Guardrails & Moderation Inspection (Phase 13)
+# ---------------------------------------------------------------------------
+
+
+@api.post(
+    "/security/scan",
+    auth=[api_key_auth, api_key_header_auth],
+    response=SecurityScanOut,
+    summary="Diagnostic Security & Guardrail Inspection",
+    description=(
+        "Scans arbitrary prompt text for sensitive PII entities (credit cards, SSNs, "
+        "emails, phone numbers, secret keys), prompt injection/jailbreak attempts, "
+        "and content moderation policy violations."
+    ),
+    tags=["Security & Guardrails"],
+)
+async def scan_security(request, payload: SecurityScanIn) -> SecurityScanOut:
+    """Standalone security scan for pre-flight vetting."""
+    res = SecurityGuardrailManager.scan_text(
+        text=payload.text,
+        mask_pii=payload.mask_pii,
+        check_injection=payload.check_injection,
+        check_moderation=payload.check_moderation,
+    )
+    return SecurityScanOut(
+        is_safe=res["is_safe"],
+        violations=res["violations"],
+        detected_pii=res["detected_pii"],
+        pii_count=res["pii_count"],
+        masked_text=res["masked_text"],
+        injection_risk=res["injection_risk"],
+        injection_score=res["injection_score"],
+        execution_time_ms=res["execution_time_ms"],
+    )
+
 
 
 

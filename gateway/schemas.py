@@ -293,6 +293,29 @@ class BenchmarkComparisonOut(BaseModel):
     sample_items: List[BenchmarkItemResultOut] = Field(..., description="Sample of item-level evaluations.")
 
 
+class SecurityScanIn(BaseModel):
+    """Input payload for standalone security and guardrail inspection."""
+
+    text: str = Field(..., min_length=1, description="Prompt text or input content to evaluate.")
+    mask_pii: bool = Field(True, description="Whether to identify and mask PII (credit cards, SSNs, emails, API keys).")
+    check_injection: bool = Field(True, description="Whether to check for prompt injections, system overrides, and jailbreaks.")
+    check_moderation: bool = Field(True, description="Whether to check content against toxicity and safety policy rules.")
+
+
+class SecurityScanOut(BaseModel):
+    """Security and guardrail evaluation report."""
+
+    is_safe: bool = Field(..., description="Whether the scanned content is free of violations.")
+    violations: List[str] = Field(default_factory=list, description="List of detected policy violations or attack triggers.")
+    detected_pii: List[str] = Field(default_factory=list, description="List of detected PII entity categories.")
+    pii_count: int = Field(0, description="Number of sensitive PII entities identified.")
+    masked_text: str = Field(..., description="Sanitized version of the input with PII redacted.")
+    injection_risk: str = Field("NONE", description="Risk assessment: NONE, LOW, MEDIUM, or HIGH.")
+    injection_score: float = Field(0.0, description="Confidence score for prompt injection (0.0 to 1.0).")
+    execution_time_ms: float = Field(..., description="Evaluation latency in milliseconds (< 2ms).")
+
+
+
 
 
 
